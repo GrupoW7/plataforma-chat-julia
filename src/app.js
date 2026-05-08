@@ -874,7 +874,7 @@ function subscribeToMessages(chatId) {
         filter: `chat_id=eq.${chatId}`,
       },
       async (payload) => {
-        if (payload.new.loja_id !== state.selectedStoreId) return;
+        if (payload.new.chat_id !== state.activeConversation?.chat_id) return;
         if (state.messages.some((message) => message.id === payload.new.id)) return;
 
         state.messages = sortMessagesByDate([...state.messages, payload.new]);
