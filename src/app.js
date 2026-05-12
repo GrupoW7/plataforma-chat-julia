@@ -14,10 +14,15 @@ const state = {
   selectedStoreId: null,
   conversations: [],
   searchQuery: "",
+  currentView: "chat",
   statusFilters: {
     active: true,
     finished: true,
   },
+  adminStores: [],
+  adminUsers: [],
+  adminEditingUserId: "",
+  adminLoading: false,
   unreadByChat: {},
   messageCountByChat: {},
   activeConversation: null,
@@ -163,7 +168,34 @@ function renderAuth() {
 
 function renderWorkspace() {
   return `
-    <main class="workspace">
+    <main class="workspace ${canManageAccess() ? "with-top-menu" : ""} ${state.currentView === "admin" ? "admin-mode" : ""}">
+      ${renderTopMenu()}
+      ${
+        state.currentView === "admin" && canManageAccess()
+          ? renderAdminPanel()
+          : renderChatWorkspace()
+      }
+    </main>
+  `;
+}
+
+function renderTopMenu() {
+  if (!canManageAccess()) return "";
+
+  return `
+    <nav class="top-menu" aria-label="Menu principal">
+      <div>
+        <strong>Julia CRM</strong>
+        <span>${escapeHtml(getRoleLabel(state.currentUser?.funcao))}</span>
+      </div>
+      <button class="${state.currentView === "chat" ? "active" : ""}" data-view="chat" type="button">Atendimento</button>
+      <button class="${state.currentView === "admin" ? "active" : ""}" data-view="admin" type="button">Gestao de acessos</button>
+    </nav>
+  `;
+}
+
+function renderChatWorkspace() {
+  return `
       <aside class="sidebar">
         <header class="sidebar-header">
           <div>
@@ -201,7 +233,147 @@ function renderWorkspace() {
       <section class="chat-panel">
         ${state.activeConversation ? renderChat() : renderEmptyChat()}
       </section>
-    </main>
+  `;
+}
+
+function renderAdminPanel() {
+  const editingUser = getEditingAdminUser();
+
+  return `
+    <section class="admin-panel">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">Gestao</p>
+          <h1>Acessos por usuario e loja</h1>
+          <p>Defina gestores por loja e quais lojas cada atendente pode visualizar.</p>
+        </div>
+        <button class="secondary-button" id="new-admin-user" type="button">Novo usuario</button>
+      </header>
+
+      ${
+        state.adminLoading
+          ? `<div class="admin-loading"><span class="loader"></span></div>`
+          : `
+            <div class="admin-grid">
+              ${renderAdminUserForm(editingUser)}
+              ${renderAdminUsersList()}
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderAdminUserForm(user) {
+  const isEditing = Boolean(user?.id);
+  const gestorStoreIds = new Set(user?.gestor_loja_ids || []);
+  const atendenteStoreIds = new Set(user?.atendente_loja_ids || []);
+  const selectedRole = user?.is_master ? "gestor" : user?.funcao || "atendente";
+
+  return `
+    <form id="admin-user-form" class="admin-card admin-form">
+      <input type="hidden" name="user_id" value="${escapeHtml(user?.id || "")}" />
+      <div>
+        <p class="eyebrow">${isEditing ? "Editar usuario" : "Novo usuario"}</p>
+        <h2>${isEditing ? escapeHtml(user.name || user.email) : "Criar acesso"}</h2>
+        ${user?.is_master ? `<p class="admin-note">Este usuario e master por email predefinido.</p>` : ""}
+      </div>
+
+      <div class="admin-form-grid">
+        <label>
+          Nome
+          <input name="name" value="${escapeHtml(user?.name || "")}" required />
+        </label>
+        <label>
+          Email
+          <input type="email" name="email" value="${escapeHtml(user?.email || "")}" required />
+        </label>
+        <label>
+          Senha
+          <input type="password" name="password" placeholder="${isEditing ? "Manter senha atual" : "Senha inicial"}" ${isEditing ? "" : "required"} />
+        </label>
+        <label>
+          Funcao
+          <select name="funcao">
+            <option value="atendente" ${selectedRole === "atendente" ? "selected" : ""}>Atendente</option>
+            <option value="gestor" ${selectedRole === "gestor" ? "selected" : ""}>Gestor</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="access-columns">
+        ${renderStoreCheckboxes("Lojas que o usuario pode gerenciar", "gestorStores", gestorStoreIds)}
+        ${renderStoreCheckboxes("Lojas que o atendente pode visualizar", "atendenteStores", atendenteStoreIds)}
+      </div>
+
+      <button class="primary-button" type="submit">${isEditing ? "Salvar usuario" : "Criar usuario"}</button>
+    </form>
+  `;
+}
+
+function renderStoreCheckboxes(title, name, selectedIds) {
+  if (!state.adminStores.length) {
+    return `
+      <fieldset class="store-checks">
+        <legend>${title}</legend>
+        <span>Nenhuma loja disponivel.</span>
+      </fieldset>
+    `;
+  }
+
+  return `
+    <fieldset class="store-checks">
+      <legend>${title}</legend>
+      <div>
+        ${state.adminStores
+          .map((store) => {
+            const label = `${store.nome || "Loja sem nome"}${store.cnpj ? ` - ${store.cnpj}` : ""}`;
+            return `
+              <label>
+                <input type="checkbox" name="${name}" value="${store.id}" ${selectedIds.has(store.id) ? "checked" : ""} />
+                <span>${escapeHtml(label)}</span>
+              </label>
+            `;
+          })
+          .join("")}
+      </div>
+    </fieldset>
+  `;
+}
+
+function renderAdminUsersList() {
+  if (!state.adminUsers.length) {
+    return `
+      <div class="admin-card empty-list">
+        <strong>Nenhum usuario encontrado</strong>
+        <span>Crie o primeiro acesso para esta operacao.</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="admin-card admin-users">
+      <div>
+        <p class="eyebrow">Usuarios</p>
+        <h2>${state.adminUsers.length} acessos</h2>
+      </div>
+      <div class="admin-user-list">
+        ${state.adminUsers
+          .map((user) => {
+            const selected = state.adminEditingUserId === user.id;
+            return `
+              <button class="admin-user-item ${selected ? "active" : ""}" data-admin-user-id="${user.id}" type="button">
+                <span>
+                  <strong>${escapeHtml(user.name || "Sem nome")}</strong>
+                  <small>${escapeHtml(user.email)}</small>
+                </span>
+                <span>${escapeHtml(getRoleLabel(user.funcao))}</span>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -399,6 +571,14 @@ function renderPreservingComposer() {
 function bindEvents() {
   document.querySelector("#auth-form")?.addEventListener("submit", handleAuth);
   document.querySelector("#sign-out")?.addEventListener("click", handleSignOut);
+  document.querySelectorAll("[data-view]").forEach((button) => {
+    button.addEventListener("click", () => handleViewChange(button.dataset.view));
+  });
+  document.querySelector("#admin-user-form")?.addEventListener("submit", handleSaveAdminUser);
+  document.querySelector("#new-admin-user")?.addEventListener("click", handleNewAdminUser);
+  document.querySelectorAll("[data-admin-user-id]").forEach((button) => {
+    button.addEventListener("click", () => handleEditAdminUser(button.dataset.adminUserId));
+  });
   document.querySelector("#store-selector")?.addEventListener("change", handleStoreChange);
   document.querySelector("#chat-search-form")?.addEventListener("submit", handleSearchChats);
   document.querySelector("#chat-search-form input")?.addEventListener("input", handleSearchInput);
@@ -419,6 +599,67 @@ function bindEvents() {
   document.querySelectorAll("[data-conversation-id]").forEach((button) => {
     button.addEventListener("click", () => selectConversation(button.dataset.conversationId));
   });
+}
+
+async function handleViewChange(view) {
+  if (view === state.currentView) return;
+  if (view === "admin" && !canManageAccess()) return;
+
+  state.currentView = view === "admin" ? "admin" : "chat";
+
+  if (state.currentView === "admin") {
+    stopMessagePolling();
+    stopConversationListPolling();
+    await loadAdminData();
+  } else {
+    if (state.selectedStoreId) {
+      startConversationListPolling();
+      if (state.activeConversation) startMessagePolling();
+    }
+  }
+
+  render();
+}
+
+function handleNewAdminUser() {
+  state.adminEditingUserId = "";
+  render();
+}
+
+function handleEditAdminUser(userId) {
+  state.adminEditingUserId = userId;
+  render();
+}
+
+async function handleSaveAdminUser(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const userId = String(formData.get("user_id") || "").trim();
+  const gestorStoreIds = getCheckedValues(form, "gestorStores");
+  const atendenteStoreIds = getCheckedValues(form, "atendenteStores");
+
+  const { data, error } = await supabase.rpc("admin_salvar_usuario", {
+    p_session_token: state.currentUser.session_token,
+    p_user_id: userId || null,
+    p_name: String(formData.get("name") || "").trim(),
+    p_email: String(formData.get("email") || "").trim(),
+    p_password: String(formData.get("password") || ""),
+    p_funcao: String(formData.get("funcao") || "atendente"),
+    p_gestor_loja_ids: gestorStoreIds,
+    p_atendente_loja_ids: atendenteStoreIds,
+  });
+
+  if (error) {
+    showToast(error.message);
+    return;
+  }
+
+  state.adminEditingUserId = data?.[0]?.id || userId || "";
+  await loadAdminData();
+  await loadStores();
+  showToast("Usuario salvo.");
+  render();
 }
 
 async function handleAuth(event) {
@@ -461,10 +702,15 @@ async function handleSignOut() {
   state.selectedStoreId = null;
   state.conversations = [];
   state.searchQuery = "";
+  state.currentView = "chat";
   state.statusFilters = {
     active: true,
     finished: true,
   };
+  state.adminStores = [];
+  state.adminUsers = [];
+  state.adminEditingUserId = "";
+  state.adminLoading = false;
   state.unreadByChat = {};
   state.messageCountByChat = {};
   state.activeConversation = null;
@@ -490,6 +736,29 @@ function handleStatusFilterChange(event) {
     [event.currentTarget.name]: event.currentTarget.checked,
   };
   render();
+}
+
+function getCheckedValues(form, name) {
+  return [...form.querySelectorAll(`input[name="${name}"]:checked`)].map(
+    (input) => input.value
+  );
+}
+
+function canManageAccess() {
+  return ["master", "gestor"].includes(state.currentUser?.funcao);
+}
+
+function getRoleLabel(role) {
+  if (role === "master") return "Master";
+  if (role === "gestor") return "Gestor";
+  return "Atendente";
+}
+
+function getEditingAdminUser() {
+  if (!state.adminEditingUserId) return null;
+  return (
+    state.adminUsers.find((user) => user.id === state.adminEditingUserId) || null
+  );
 }
 
 async function handleStoreChange(event) {
@@ -660,13 +929,26 @@ async function loadInitialData() {
   }
 
   if (state.currentUser) {
+    await refreshCurrentUserProfile();
+    if (!state.currentUser) {
+      state.loading = false;
+      render();
+      return;
+    }
     requestNotificationPermission();
     await loadStores();
+    if (!canManageAccess() && state.currentView === "admin") {
+      state.currentView = "chat";
+    }
     await loadConversations({ notify: false });
     if (state.conversations[0]) {
       await selectConversation(state.conversations[0].id, { silent: true });
     }
-    startConversationListPolling();
+    if (state.currentView === "admin" && canManageAccess()) {
+      await loadAdminData();
+    } else {
+      startConversationListPolling();
+    }
   }
 
   state.loading = false;
@@ -680,6 +962,26 @@ function readSavedUser() {
   } catch {
     return null;
   }
+}
+
+async function refreshCurrentUserProfile() {
+  if (!state.currentUser?.session_token) return;
+
+  const { data, error } = await supabase.rpc("perfil_atendimento", {
+    p_session_token: state.currentUser.session_token,
+  });
+
+  if (error || !data?.[0]) {
+    localStorage.removeItem(SESSION_KEY);
+    state.currentUser = null;
+    return;
+  }
+
+  state.currentUser = {
+    ...state.currentUser,
+    ...data[0],
+  };
+  localStorage.setItem(SESSION_KEY, JSON.stringify(state.currentUser));
 }
 
 async function loadStores() {
@@ -698,6 +1000,42 @@ async function loadStores() {
     state.stores.some((store) => store.id === state.selectedStoreId)
       ? state.selectedStoreId
       : state.stores[0]?.id || null;
+}
+
+async function loadAdminData() {
+  if (!canManageAccess()) return;
+
+  state.adminLoading = true;
+  render();
+
+  const [storesResult, usersResult] = await Promise.all([
+    supabase.rpc("admin_listar_lojas", {
+      p_session_token: state.currentUser.session_token,
+    }),
+    supabase.rpc("admin_listar_usuarios", {
+      p_session_token: state.currentUser.session_token,
+    }),
+  ]);
+
+  if (storesResult.error) {
+    showToast(storesResult.error.message);
+  } else {
+    state.adminStores = storesResult.data || [];
+  }
+
+  if (usersResult.error) {
+    showToast(usersResult.error.message);
+  } else {
+    state.adminUsers = usersResult.data || [];
+    if (
+      state.adminEditingUserId &&
+      !state.adminUsers.some((user) => user.id === state.adminEditingUserId)
+    ) {
+      state.adminEditingUserId = "";
+    }
+  }
+
+  state.adminLoading = false;
 }
 
 async function loadConversations(options = {}) {
