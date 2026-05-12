@@ -205,22 +205,6 @@ input:disabled {
   background: var(--bg);
 }
 
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #1e63ff, #151515);
-  color: #ffffff;
-  font-weight: 900;
-}
-
-.avatar.large {
-  width: 46px;
-  height: 46px;
-}
-
 .small-icon-button {
   width: 34px;
   height: 34px;
@@ -233,7 +217,7 @@ input:disabled {
 
 .sidebar {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
   min-width: 0;
   padding: 14px;
   background: transparent;
@@ -285,6 +269,37 @@ input:disabled {
   border-radius: 8px;
 }
 
+.status-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.status-filters legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.status-filters label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.status-filters input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-2);
+}
+
 .conversation-list {
   display: grid;
   align-content: start;
@@ -295,8 +310,6 @@ input:disabled {
 
 .conversation-item {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
-  gap: 14px;
   width: 100%;
   min-height: 94px;
   padding: 14px;
@@ -394,6 +407,27 @@ input:disabled {
   margin: 2px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.finish-chat-button {
+  margin-left: auto;
+  height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: #ffffff;
+  font-weight: 800;
+}
+
+.finish-chat-button:hover:not(:disabled) {
+  border-color: var(--accent-2);
+  background: var(--accent);
+}
+
+.finish-chat-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .message-list {

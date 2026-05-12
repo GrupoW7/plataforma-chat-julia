@@ -5,6 +5,8 @@ const ZAIA_MESSAGE_API_URL =
   "https://core-service.zaia.app/v1.1/api/message-cross-channel/create";
 const ZAIA_AGENT_ID = 70482;
 const ZAIA_AUTH_TOKEN = "7ca346d9-0834-4559-b9ec-6eb8888320bd";
+const FINISH_CHAT_WEBHOOK_URL =
+  "https://hook.us1.make.com/lihc76dghcolia5uhycxenuovbv9vdux";
 
 const state = {
   currentUser: null,
@@ -12,6 +14,10 @@ const state = {
   selectedStoreId: null,
   conversations: [],
   searchQuery: "",
+  statusFilters: {
+    active: true,
+    finished: true,
+  },
   unreadByChat: {},
   messageCountByChat: {},
   activeConversation: null,
@@ -173,6 +179,18 @@ function renderWorkspace() {
           <button type="submit" title="Filtrar busca" aria-label="Filtrar busca" ${state.selectedStoreId ? "" : "disabled"}>Buscar</button>
         </form>
 
+        <fieldset class="status-filters">
+          <legend>Status</legend>
+          <label>
+            <input type="checkbox" name="active" ${state.statusFilters.active ? "checked" : ""} />
+            Em andamento
+          </label>
+          <label>
+            <input type="checkbox" name="finished" ${state.statusFilters.finished ? "checked" : ""} />
+            Finalizadas
+          </label>
+        </fieldset>
+
         <div class="conversation-list">
           ${renderConversationList()}
         </div>
@@ -252,7 +270,6 @@ function renderConversationList() {
 
       return `
         <button class="conversation-item ${isActive ? "active" : ""}" data-conversation-id="${conversation.id}" type="button">
-          <span class="avatar">${escapeHtml(title.slice(0, 1).toUpperCase())}</span>
           <span class="conversation-copy">
             <span class="conversation-topline">
               <strong>${escapeHtml(title)}</strong>
@@ -271,9 +288,16 @@ function renderConversationList() {
 
 function getFilteredConversations() {
   const query = state.searchQuery.trim().toLowerCase();
-  if (!query) return state.conversations;
 
   return state.conversations.filter((conversation) => {
+    if (!matchesStatusFilter(conversation)) {
+      return false;
+    }
+
+    if (!query) {
+      return true;
+    }
+
     const searchable = [
       conversation.nomecliente,
       conversation.telefone,
@@ -289,6 +313,13 @@ function getFilteredConversations() {
   });
 }
 
+function matchesStatusFilter(conversation) {
+  const isActive = Boolean(conversation.status_ativo);
+  if (isActive && state.statusFilters.active) return true;
+  if (!isActive && state.statusFilters.finished) return true;
+  return false;
+}
+
 function renderChat() {
   const title =
     state.activeConversation.nomecliente ||
@@ -298,11 +329,13 @@ function renderChat() {
 
   return `
     <header class="chat-header">
-      <span class="avatar large">${escapeHtml(title.slice(0, 1).toUpperCase())}</span>
       <div>
         <h2>${escapeHtml(title)}</h2>
         <p>${escapeHtml(`${store?.nome || "Loja"} - ${status}`)}</p>
       </div>
+      <button class="finish-chat-button" id="finish-chat" type="button" ${state.activeConversation.status_ativo ? "" : "disabled"}>
+        Finalizar
+      </button>
     </header>
 
     <div class="message-list" id="message-list">
@@ -369,7 +402,11 @@ function bindEvents() {
   document.querySelector("#store-selector")?.addEventListener("change", handleStoreChange);
   document.querySelector("#chat-search-form")?.addEventListener("submit", handleSearchChats);
   document.querySelector("#chat-search-form input")?.addEventListener("input", handleSearchInput);
+  document.querySelectorAll(".status-filters input").forEach((input) => {
+    input.addEventListener("change", handleStatusFilterChange);
+  });
   document.querySelector("#message-form")?.addEventListener("submit", handleSendMessage);
+  document.querySelector("#finish-chat")?.addEventListener("click", handleFinishChat);
   document.querySelector(".workspace")?.addEventListener("pointerdown", markUserInteraction);
   document.querySelector(".workspace")?.addEventListener("keydown", markUserInteraction);
   document.querySelector(".message-list")?.addEventListener("scroll", markUserInteraction, {
@@ -424,6 +461,10 @@ async function handleSignOut() {
   state.selectedStoreId = null;
   state.conversations = [];
   state.searchQuery = "";
+  state.statusFilters = {
+    active: true,
+    finished: true,
+  };
   state.unreadByChat = {};
   state.messageCountByChat = {};
   state.activeConversation = null;
@@ -441,6 +482,14 @@ function handleSearchChats(event) {
 function handleSearchInput(event) {
   markUserInteraction();
   state.searchQuery = event.currentTarget.value;
+}
+
+function handleStatusFilterChange(event) {
+  state.statusFilters = {
+    ...state.statusFilters,
+    [event.currentTarget.name]: event.currentTarget.checked,
+  };
+  render();
 }
 
 async function handleStoreChange(event) {
@@ -491,6 +540,66 @@ async function handleSendMessage(event) {
   await loadConversations({ notify: false });
   syncActiveConversationFromList();
   render();
+}
+
+async function handleFinishChat() {
+  if (!state.activeConversation || !state.selectedStoreId) return;
+
+  const webhookError = await sendFinishChatWebhook(
+    state.activeConversation.chat_id
+  );
+  if (webhookError) {
+    showToast(webhookError);
+    return;
+  }
+
+  const { data, error } = await supabase.rpc("finalizar_conversa_atendimento", {
+    p_session_token: state.currentUser.session_token,
+    p_loja_id: state.selectedStoreId,
+    p_chat_id: state.activeConversation.chat_id,
+  });
+
+  if (error) {
+    showToast(error.message);
+    return;
+  }
+
+  const updated = data?.[0];
+  if (updated) {
+    state.activeConversation = {
+      ...state.activeConversation,
+      data_fim: updated.data_fim,
+      status_ativo: updated.status_ativo,
+    };
+  }
+
+  await loadConversations({ notify: false });
+  syncActiveConversationFromList();
+  render();
+  showToast("Conversa finalizada.");
+}
+
+async function sendFinishChatWebhook(chatId) {
+  try {
+    const response = await fetch(FINISH_CHAT_WEBHOOK_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        chat_id: String(chatId),
+      }),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text();
+      return detail || `Erro ${response.status} ao chamar webhook de finalizacao.`;
+    }
+
+    return null;
+  } catch (error) {
+    return error.message || "Nao foi possivel chamar o webhook de finalizacao.";
+  }
 }
 
 async function sendMessageToZaia(message) {
@@ -874,7 +983,7 @@ function subscribeToMessages(chatId) {
         filter: `chat_id=eq.${chatId}`,
       },
       async (payload) => {
-        if (payload.new.chat_id !== state.activeConversation?.chat_id) return;
+        if (payload.new.loja_id !== state.selectedStoreId) return;
         if (state.messages.some((message) => message.id === payload.new.id)) return;
 
         state.messages = sortMessagesByDate([...state.messages, payload.new]);

@@ -147,12 +147,13 @@ as $$
     ) ck
     left join public.mensagens m
       on m.chat_id = ck.chat_id
+     and m.loja_id = ck.loja_id
     group by ck.chat_id, ck.loja_id
   ),
   ultima_mensagem as (
-    select distinct on (ck.chat_id, ck.loja_id)
+    select distinct on (m.chat_id, m.loja_id)
       m.chat_id,
-      ck.loja_id,
+      m.loja_id,
       m.conteudo,
       m.criado_em
     from public.mensagens m
@@ -161,7 +162,8 @@ as $$
       from chats_liberados
     ) ck
       on ck.chat_id = m.chat_id
-    order by ck.chat_id, ck.loja_id, m.criado_em desc nulls last
+     and ck.loja_id = m.loja_id
+    order by m.chat_id, m.loja_id, m.criado_em desc nulls last
   ),
   historico_unico as (
     select distinct on (cl.chat_id, cl.loja_id)
@@ -218,15 +220,10 @@ as $$
     on l.id = ua.loja_id
   join public.mensagens m
     on m.chat_id = p_chat_id
+   and m.loja_id = l.id
   where s.token = p_session_token
     and s.expires_at > now()
     and l.id = p_loja_id
-    and exists (
-      select 1
-      from public.historico_conversas hc
-      where hc.chat_id = p_chat_id
-        and hc.loja_id = p_loja_id
-    )
   order by m.criado_em asc nulls last;
 $$;
 
@@ -364,9 +361,50 @@ begin
 end;
 $$;
 
+create or replace function public.finalizar_conversa_atendimento(
+  p_session_token uuid,
+  p_loja_id uuid,
+  p_chat_id text
+)
+returns table (
+  id uuid,
+  chat_id text,
+  loja_id uuid,
+  data_fim timestamptz,
+  status_ativo boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1
+    from public.atendimento_sessions s
+    join public.usuarios_atendentes ua
+      on ua.user_id = s.user_id
+     and ua.loja_id = p_loja_id
+    where s.token = p_session_token
+      and s.expires_at > now()
+  ) then
+    raise exception 'Sessao invalida ou usuario sem acesso a esta loja';
+  end if;
+
+  return query
+  update public.historico_conversas hc
+  set
+    data_fim = now(),
+    status_ativo = false
+  where hc.chat_id = p_chat_id
+    and hc.loja_id = p_loja_id
+  returning hc.id, hc.chat_id, hc.loja_id, hc.data_fim, hc.status_ativo;
+end;
+$$;
+
 grant execute on function public.login_atendente(text, text) to anon, authenticated;
 grant execute on function public.lojas_do_atendente(uuid) to anon, authenticated;
 grant execute on function public.historico_por_loja(uuid, uuid) to anon, authenticated;
 grant execute on function public.mensagens_da_conversa(uuid, uuid, text) to anon, authenticated;
 grant execute on function public.criar_conversa_atendimento(uuid, uuid, text, text) to anon, authenticated;
 grant execute on function public.enviar_mensagem_atendente(uuid, uuid, text, text) to anon, authenticated;
+grant execute on function public.finalizar_conversa_atendimento(uuid, uuid, text) to anon, authenticated;
