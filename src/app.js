@@ -8,6 +8,9 @@ const ZAIA_AUTH_TOKEN = "7ca346d9-0834-4559-b9ec-6eb8888320bd";
 const FINISH_CHAT_WEBHOOK_URL =
   "https://hook.us1.make.com/lihc76dghcolia5uhycxenuovbv9vdux";
 const DISPLAY_TIME_OFFSET_MS = -3 * 60 * 60 * 1000;
+const MOBILE_SIDEBAR_QUERY = "(max-width: 820px)";
+const isMobileSidebarViewport = () =>
+  window.matchMedia(MOBILE_SIDEBAR_QUERY).matches;
 
 const state = {
   currentUser: null,
@@ -17,6 +20,7 @@ const state = {
   searchQuery: "",
   currentView: "chat",
   menuOpen: false,
+  sidebarOpen: !isMobileSidebarViewport(),
   statusFilters: {
     active: true,
     finished: true,
@@ -24,6 +28,7 @@ const state = {
   adminStores: [],
   adminUsers: [],
   adminEditingUserId: "",
+  adminStoreSearch: "",
   adminLoading: false,
   unreadByChat: {},
   messageCountByChat: {},
@@ -172,8 +177,15 @@ function renderAuth() {
 }
 
 function renderWorkspace() {
+  const chatLayoutClass =
+    state.currentView === "chat"
+      ? state.sidebarOpen
+        ? "sidebar-open"
+        : "sidebar-collapsed"
+      : "";
+
   return `
-    <main class="workspace with-top-menu ${state.currentView !== "chat" ? "admin-mode" : ""}">
+    <main class="workspace with-top-menu ${state.currentView !== "chat" ? "admin-mode" : ""} ${chatLayoutClass}">
       ${renderTopMenu()}
       ${
         state.currentView === "password"
@@ -193,11 +205,13 @@ function renderTopMenu() {
         <strong>Julia CRM</strong>
         <span>${escapeHtml(getRoleLabel(state.currentUser?.funcao))}</span>
       </div>
-      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="${state.menuOpen ? "true" : "false"}">
-        <span></span>
-        <span></span>
-        <span></span>
-      </button>
+      <span class="top-menu-actions">
+        <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="${state.menuOpen ? "true" : "false"}">
+          <span></span>
+          <span></span>
+          <span></span>
+        </button>
+      </span>
     </nav>
     ${renderSideMenu()}
   `;
@@ -219,20 +233,31 @@ function renderSideMenu() {
         <button class="${state.currentView === "chat" ? "active" : ""}" data-view="chat" type="button">Atendimento</button>
         ${canManageAccess() ? `<button class="${state.currentView === "admin" ? "active" : ""}" data-view="admin" type="button">Gestão de acessos</button>` : ""}
         <button class="${state.currentView === "password" ? "active" : ""}" data-view="password" type="button">Trocar senha</button>
+        <button class="side-sign-out" id="side-sign-out" type="button">Sair</button>
       </nav>
-      <button class="side-sign-out" id="side-sign-out" type="button">Sair</button>
     </aside>
+  `;
+}
+
+function renderHistoryToggle(id, label) {
+  return `
+    <button class="history-toggle icon-button" id="${id}" type="button" aria-label="${label}" title="${label}">
+      <span class="message-icon" aria-hidden="true"></span>
+    </button>
   `;
 }
 
 function renderChatWorkspace() {
   return `
+      <button class="history-overlay ${state.sidebarOpen ? "open" : ""}" id="history-overlay" type="button" aria-label="Fechar histórico"></button>
+      ${!state.sidebarOpen ? `<div class="history-rail">${renderHistoryToggle("history-rail-toggle", "Abrir histórico")}</div>` : ""}
       <aside class="sidebar">
         <header class="sidebar-header">
           <div>
             <p class="eyebrow">Histórico</p>
             <h1>Conversas</h1>
           </div>
+          <button class="sidebar-close" id="sidebar-close" type="button" aria-label="Esconder histórico">×</button>
         </header>
 
         ${renderStoreSelector()}
@@ -258,7 +283,6 @@ function renderChatWorkspace() {
           ${renderConversationList()}
         </div>
 
-        <button class="sign-out-button" id="sign-out" type="button">Sair</button>
       </aside>
 
       <section class="chat-panel">
@@ -390,7 +414,7 @@ function renderStoreCheckboxes(title, name, selectedIds) {
       <div class="store-checks-toolbar">
         <label>
           Buscar loja
-          <input type="search" id="store-access-search" placeholder="Nome ou CNPJ" autocomplete="off" />
+          <input type="search" id="store-access-search" value="${escapeHtml(state.adminStoreSearch)}" placeholder="Nome ou CNPJ" autocomplete="off" />
         </label>
         <label class="select-all-stores">
           <input type="checkbox" id="select-all-stores" />
@@ -402,7 +426,7 @@ function renderStoreCheckboxes(title, name, selectedIds) {
           .map((store) => {
             const label = `${store.nome || "Loja sem nome"}${store.cnpj ? ` - ${store.cnpj}` : ""}`;
             return `
-              <label data-store-access-label="${escapeHtml(label.toLowerCase())}">
+              <label data-store-access-label="${escapeHtml(label.toLowerCase())}" ${shouldHideAdminStore(label) ? "hidden" : ""}>
                 <input type="checkbox" name="${name}" value="${store.id}" ${selectedIds.has(store.id) ? "checked" : ""} />
                 <span>${escapeHtml(label)}</span>
               </label>
@@ -418,6 +442,11 @@ function getAccessStoresTitle(role) {
   return role === "gestor"
     ? "Lojas que o usuário pode gerenciar"
     : "Lojas que o atendente pode visualizar";
+}
+
+function shouldHideAdminStore(label) {
+  const query = state.adminStoreSearch.trim().toLowerCase();
+  return Boolean(query) && !label.toLowerCase().includes(query);
 }
 
 function renderAdminUsersList() {
@@ -650,11 +679,13 @@ function renderPreservingComposer() {
 
 function bindEvents() {
   document.querySelector("#auth-form")?.addEventListener("submit", handleAuth);
-  document.querySelector("#sign-out")?.addEventListener("click", handleSignOut);
   document.querySelector("#side-sign-out")?.addEventListener("click", handleSignOut);
   document.querySelector("#menu-toggle")?.addEventListener("click", toggleSideMenu);
   document.querySelector("#menu-close")?.addEventListener("click", closeSideMenu);
   document.querySelector("#menu-overlay")?.addEventListener("click", closeSideMenu);
+  document.querySelector("#history-rail-toggle")?.addEventListener("click", toggleHistorySidebar);
+  document.querySelector("#sidebar-close")?.addEventListener("click", closeHistorySidebar);
+  document.querySelector("#history-overlay")?.addEventListener("click", closeHistorySidebar);
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => handleViewChange(button.dataset.view));
   });
@@ -699,6 +730,9 @@ async function handleViewChange(view) {
 
   state.menuOpen = false;
   state.currentView = ["admin", "password"].includes(view) ? view : "chat";
+  if (state.currentView === "chat" && isMobileSidebarViewport()) {
+    state.sidebarOpen = false;
+  }
 
   if (state.currentView !== "chat") {
     stopMessagePolling();
@@ -725,6 +759,22 @@ function closeSideMenu() {
   if (!state.menuOpen) return;
   state.menuOpen = false;
   renderPreservingComposer();
+}
+
+function toggleHistorySidebar() {
+  state.sidebarOpen = !state.sidebarOpen;
+  renderPreservingComposer();
+}
+
+function closeHistorySidebar() {
+  if (!state.sidebarOpen) return;
+  state.sidebarOpen = false;
+  renderPreservingComposer();
+}
+
+function closeMobileHistorySidebar() {
+  if (!isMobileSidebarViewport() || !state.sidebarOpen) return;
+  state.sidebarOpen = false;
 }
 
 async function handleChangePassword(event) {
@@ -774,6 +824,7 @@ function handleAdminRoleChange(event) {
 
 function handleStoreAccessSearch(event) {
   const query = event.currentTarget.value.trim().toLowerCase();
+  state.adminStoreSearch = query;
   document.querySelectorAll("[data-store-access-label]").forEach((item) => {
     const text = item.dataset.storeAccessLabel || "";
     item.hidden = Boolean(query) && !text.includes(query);
@@ -877,6 +928,7 @@ async function handleSignOut() {
   state.searchQuery = "";
   state.currentView = "chat";
   state.menuOpen = false;
+  state.sidebarOpen = !isMobileSidebarViewport();
   state.statusFilters = {
     active: true,
     finished: true,
@@ -884,6 +936,7 @@ async function handleSignOut() {
   state.adminStores = [];
   state.adminUsers = [];
   state.adminEditingUserId = "";
+  state.adminStoreSearch = "";
   state.adminLoading = false;
   state.unreadByChat = {};
   state.messageCountByChat = {};
@@ -1312,6 +1365,7 @@ async function selectConversation(conversationId, options = {}) {
   state.messages = sortMessagesByDate(data || []);
   subscribeToMessages(conversation.chat_id);
   startMessagePolling();
+  closeMobileHistorySidebar();
 
   if (!options.silent) render();
 }
