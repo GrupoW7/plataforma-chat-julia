@@ -401,7 +401,7 @@ begin
   v_user_id := public.crm_session_user_id(p_session_token);
 
   if v_user_id is null or not public.crm_user_can_access_store(v_user_id, p_loja_id) then
-    raise exception 'Sessao invalida ou usuario sem acesso a esta loja';
+    raise exception 'Sessão inválida ou usuário sem acesso a esta loja';
   end if;
 
   if not exists (
@@ -410,7 +410,7 @@ begin
     where hc.chat_id = p_chat_id
       and hc.loja_id = p_loja_id
   ) then
-    raise exception 'Conversa nao encontrada nesta loja';
+    raise exception 'Conversa não encontrada nesta loja';
   end if;
 
   insert into public.mensagens (chat_id, loja_id, remetente_tipo, conteudo)
@@ -447,7 +447,7 @@ begin
   v_user_id := public.crm_session_user_id(p_session_token);
 
   if v_user_id is null or not public.crm_user_can_access_store(v_user_id, p_loja_id) then
-    raise exception 'Sessao invalida ou usuario sem acesso a esta loja';
+    raise exception 'Sessão inválida ou usuário sem acesso a esta loja';
   end if;
 
   return query
@@ -579,7 +579,7 @@ begin
   v_admin_role := public.crm_user_role(v_admin_id);
 
   if v_admin_id is null or v_admin_role not in ('master', 'gestor') then
-    raise exception 'Usuario sem permissao administrativa';
+    raise exception 'Usuário sem permissão administrativa';
   end if;
 
   v_funcao := case
@@ -594,21 +594,17 @@ begin
 
   foreach v_store_id in array coalesce(p_gestor_loja_ids, array[]::uuid[]) loop
     if not v_store_id = any(v_allowed_store_ids) then
-      raise exception 'Loja indisponivel para gestao';
+      raise exception 'Loja indisponível para gestão';
     end if;
   end loop;
 
   foreach v_store_id in array coalesce(p_atendente_loja_ids, array[]::uuid[]) loop
     if not v_store_id = any(v_allowed_store_ids) then
-      raise exception 'Loja indisponivel para atendimento';
+      raise exception 'Loja indisponível para atendimento';
     end if;
   end loop;
 
   if nullif(trim(coalesce(p_user_id, '')), '') is null then
-    if nullif(trim(coalesce(p_password, '')), '') is null then
-      raise exception 'Informe uma senha para criar usuario';
-    end if;
-
     v_user_id := gen_random_uuid()::text;
 
     insert into public.users (id, name, email, password, funcao, "updatedAt")
@@ -616,7 +612,7 @@ begin
       v_user_id,
       nullif(trim(p_name), ''),
       lower(trim(p_email)),
-      p_password,
+      coalesce(nullif(trim(coalesce(p_password, '')), ''), 'acesso123'),
       v_funcao,
       now()
     );
@@ -624,7 +620,7 @@ begin
     v_user_id := p_user_id;
 
     if not exists (select 1 from public.users u where u.id = v_user_id) then
-      raise exception 'Usuario nao encontrado';
+      raise exception 'Usuário não encontrado';
     end if;
 
     update public.users u
@@ -667,6 +663,46 @@ begin
 end;
 $$;
 
+create or replace function public.alterar_senha_atendimento(
+  p_session_token uuid,
+  p_senha_atual text,
+  p_nova_senha text
+)
+returns table (
+  success boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_user_id text;
+begin
+  v_user_id := public.crm_session_user_id(p_session_token);
+
+  if v_user_id is null then
+    raise exception 'Sessão inválida';
+  end if;
+
+  if nullif(trim(coalesce(p_nova_senha, '')), '') is null or length(p_nova_senha) < 6 then
+    raise exception 'A nova senha deve ter pelo menos 6 caracteres';
+  end if;
+
+  update public.users u
+  set
+    password = p_nova_senha,
+    "updatedAt" = now()
+  where u.id = v_user_id
+    and u.password = p_senha_atual;
+
+  if not found then
+    raise exception 'Senha atual inválida';
+  end if;
+
+  return query select true;
+end;
+$$;
+
 grant execute on function public.crm_user_role(text) to anon, authenticated;
 grant execute on function public.crm_session_user_id(uuid) to anon, authenticated;
 grant execute on function public.crm_user_can_access_store(text, uuid) to anon, authenticated;
@@ -680,3 +716,4 @@ grant execute on function public.finalizar_conversa_atendimento(uuid, uuid, text
 grant execute on function public.admin_listar_lojas(uuid) to anon, authenticated;
 grant execute on function public.admin_listar_usuarios(uuid) to anon, authenticated;
 grant execute on function public.admin_salvar_usuario(uuid, text, text, text, text, text, uuid[], uuid[]) to anon, authenticated;
+grant execute on function public.alterar_senha_atendimento(uuid, text, text) to anon, authenticated;

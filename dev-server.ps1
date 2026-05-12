@@ -1,5 +1,9 @@
+param(
+  [int]$Port = 3001
+)
+
 $root = (Resolve-Path $PSScriptRoot).Path
-$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, 3000)
+$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
 $listener.Start()
 
 $contentTypes = @{

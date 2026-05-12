@@ -7,6 +7,7 @@ const ZAIA_AGENT_ID = 70482;
 const ZAIA_AUTH_TOKEN = "7ca346d9-0834-4559-b9ec-6eb8888320bd";
 const FINISH_CHAT_WEBHOOK_URL =
   "https://hook.us1.make.com/lihc76dghcolia5uhycxenuovbv9vdux";
+const DISPLAY_TIME_OFFSET_MS = -3 * 60 * 60 * 1000;
 
 const state = {
   currentUser: null,
@@ -15,6 +16,7 @@ const state = {
   conversations: [],
   searchQuery: "",
   currentView: "chat",
+  menuOpen: false,
   statusFilters: {
     active: true,
     finished: true,
@@ -91,12 +93,15 @@ function createSupabaseRestClient(url, apiKey) {
 
 const formatTime = (value) => {
   if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(new Date(date.getTime() + DISPLAY_TIME_OFFSET_MS));
 };
 
 const escapeHtml = (value = "") =>
@@ -127,7 +132,7 @@ function renderMissingConfig() {
   return `
     <main class="setup-screen">
       <section class="setup-panel">
-        <p class="eyebrow">Configuracao pendente</p>
+        <p class="eyebrow">Configuração pendente</p>
         <h1>Conecte seu projeto Supabase</h1>
         <p>Edite <code>src/config.js</code> com <code>SUPABASE_URL</code> e <code>SUPABASE_ANON_KEY</code>.</p>
       </section>
@@ -141,10 +146,10 @@ function renderAuth() {
       <section class="auth-copy">
         <p class="eyebrow">Julia CRM</p>
         <h1>Central de atendimento WhatsApp em tempo real por loja.</h1>
-        <p>Acesse com seu usuario da plataforma Julia para visualizar somente as lojas liberadas para o seu atendimento.</p>
+        <p>Acesse com seu usuário da plataforma Julia para visualizar somente as lojas liberadas para o seu atendimento.</p>
       </section>
 
-      <section class="auth-panel" aria-label="Formulario de acesso">
+      <section class="auth-panel" aria-label="Formulário de acesso">
         <div>
           <h2>Entrar</h2>
           <p>Preencha os dados para acessar.</p>
@@ -152,7 +157,7 @@ function renderAuth() {
 
         <form id="auth-form" class="stack">
           <label>
-            Email
+            E-mail
             <input type="email" name="email" autocomplete="email" required />
           </label>
           <label>
@@ -168,10 +173,12 @@ function renderAuth() {
 
 function renderWorkspace() {
   return `
-    <main class="workspace ${canManageAccess() ? "with-top-menu" : ""} ${state.currentView === "admin" ? "admin-mode" : ""}">
+    <main class="workspace with-top-menu ${state.currentView !== "chat" ? "admin-mode" : ""}">
       ${renderTopMenu()}
       ${
-        state.currentView === "admin" && canManageAccess()
+        state.currentView === "password"
+          ? renderPasswordPanel()
+          : state.currentView === "admin" && canManageAccess()
           ? renderAdminPanel()
           : renderChatWorkspace()
       }
@@ -180,17 +187,41 @@ function renderWorkspace() {
 }
 
 function renderTopMenu() {
-  if (!canManageAccess()) return "";
-
   return `
     <nav class="top-menu" aria-label="Menu principal">
       <div>
         <strong>Julia CRM</strong>
         <span>${escapeHtml(getRoleLabel(state.currentUser?.funcao))}</span>
       </div>
-      <button class="${state.currentView === "chat" ? "active" : ""}" data-view="chat" type="button">Atendimento</button>
-      <button class="${state.currentView === "admin" ? "active" : ""}" data-view="admin" type="button">Gestao de acessos</button>
+      <button class="menu-toggle" id="menu-toggle" type="button" aria-label="Abrir menu" aria-expanded="${state.menuOpen ? "true" : "false"}">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
     </nav>
+    ${renderSideMenu()}
+  `;
+}
+
+function renderSideMenu() {
+  return `
+    <button class="menu-overlay ${state.menuOpen ? "open" : ""}" id="menu-overlay" type="button" aria-label="Fechar menu"></button>
+    <aside class="side-menu ${state.menuOpen ? "open" : ""}" aria-label="Submenu principal">
+      <header>
+        <div>
+          <p class="eyebrow">Menu</p>
+          <strong>Julia CRM</strong>
+          <span>${escapeHtml(getRoleLabel(state.currentUser?.funcao))}</span>
+        </div>
+        <button class="menu-close" id="menu-close" type="button" aria-label="Fechar menu">×</button>
+      </header>
+      <nav>
+        <button class="${state.currentView === "chat" ? "active" : ""}" data-view="chat" type="button">Atendimento</button>
+        ${canManageAccess() ? `<button class="${state.currentView === "admin" ? "active" : ""}" data-view="admin" type="button">Gestão de acessos</button>` : ""}
+        <button class="${state.currentView === "password" ? "active" : ""}" data-view="password" type="button">Trocar senha</button>
+      </nav>
+      <button class="side-sign-out" id="side-sign-out" type="button">Sair</button>
+    </aside>
   `;
 }
 
@@ -199,7 +230,7 @@ function renderChatWorkspace() {
       <aside class="sidebar">
         <header class="sidebar-header">
           <div>
-            <p class="eyebrow">Historico</p>
+            <p class="eyebrow">Histórico</p>
             <h1>Conversas</h1>
           </div>
         </header>
@@ -207,7 +238,7 @@ function renderChatWorkspace() {
         ${renderStoreSelector()}
 
         <form id="chat-search-form" class="new-chat">
-          <input name="search" value="${escapeHtml(state.searchQuery)}" placeholder="Buscar cliente" aria-label="Buscar cliente" ${state.selectedStoreId ? "" : "disabled"} />
+          <input name="search" value="${escapeHtml(state.searchQuery)}" placeholder="Buscar nome ou WhatsApp" aria-label="Buscar nome ou WhatsApp" ${state.selectedStoreId ? "" : "disabled"} />
           <button type="submit" title="Filtrar busca" aria-label="Filtrar busca" ${state.selectedStoreId ? "" : "disabled"}>Buscar</button>
         </form>
 
@@ -243,11 +274,11 @@ function renderAdminPanel() {
     <section class="admin-panel">
       <header class="admin-header">
         <div>
-          <p class="eyebrow">Gestao</p>
-          <h1>Acessos por usuario e loja</h1>
+          <p class="eyebrow">Gestão</p>
+          <h1>Acessos por usuário e loja</h1>
           <p>Defina gestores por loja e quais lojas cada atendente pode visualizar.</p>
         </div>
-        <button class="secondary-button" id="new-admin-user" type="button">Novo usuario</button>
+        <button class="secondary-button" id="new-admin-user" type="button">Novo usuário</button>
       </header>
 
       ${
@@ -264,19 +295,50 @@ function renderAdminPanel() {
   `;
 }
 
+function renderPasswordPanel() {
+  return `
+    <section class="password-panel">
+      <form id="password-form" class="admin-card password-card">
+        <div>
+          <p class="eyebrow">Segurança</p>
+          <h1>Trocar senha</h1>
+          <p>Atualize a senha usada para acessar a plataforma Julia CRM.</p>
+        </div>
+
+        <label>
+          Senha atual
+          <input type="password" name="current_password" autocomplete="current-password" required />
+        </label>
+        <label>
+          Nova senha
+          <input type="password" name="new_password" autocomplete="new-password" minlength="6" required />
+        </label>
+        <label>
+          Confirmar nova senha
+          <input type="password" name="confirm_password" autocomplete="new-password" minlength="6" required />
+        </label>
+
+        <button class="primary-button" type="submit">Atualizar senha</button>
+      </form>
+    </section>
+  `;
+}
+
 function renderAdminUserForm(user) {
   const isEditing = Boolean(user?.id);
   const gestorStoreIds = new Set(user?.gestor_loja_ids || []);
   const atendenteStoreIds = new Set(user?.atendente_loja_ids || []);
   const selectedRole = user?.is_master ? "gestor" : user?.funcao || "atendente";
+  const accessStoreIds =
+    selectedRole === "gestor" ? gestorStoreIds : atendenteStoreIds;
 
   return `
     <form id="admin-user-form" class="admin-card admin-form">
       <input type="hidden" name="user_id" value="${escapeHtml(user?.id || "")}" />
       <div>
-        <p class="eyebrow">${isEditing ? "Editar usuario" : "Novo usuario"}</p>
+        <p class="eyebrow">${isEditing ? "Editar usuário" : "Novo usuário"}</p>
         <h2>${isEditing ? escapeHtml(user.name || user.email) : "Criar acesso"}</h2>
-        ${user?.is_master ? `<p class="admin-note">Este usuario e master por email predefinido.</p>` : ""}
+        ${user?.is_master ? `<p class="admin-note">Este usuário é master por e-mail predefinido.</p>` : ""}
       </div>
 
       <div class="admin-form-grid">
@@ -285,28 +347,29 @@ function renderAdminUserForm(user) {
           <input name="name" value="${escapeHtml(user?.name || "")}" required />
         </label>
         <label>
-          Email
+          E-mail
           <input type="email" name="email" value="${escapeHtml(user?.email || "")}" required />
         </label>
         <label>
           Senha
-          <input type="password" name="password" placeholder="${isEditing ? "Manter senha atual" : "Senha inicial"}" ${isEditing ? "" : "required"} />
+          <input type="password" name="password" placeholder="${isEditing ? "Manter senha atual" : "Padrão: acesso123"}" />
         </label>
         <label>
-          Funcao
-          <select name="funcao">
+          Função
+          <select id="admin-role-selector" name="funcao">
             <option value="atendente" ${selectedRole === "atendente" ? "selected" : ""}>Atendente</option>
             <option value="gestor" ${selectedRole === "gestor" ? "selected" : ""}>Gestor</option>
           </select>
         </label>
       </div>
 
-      <div class="access-columns">
-        ${renderStoreCheckboxes("Lojas que o usuario pode gerenciar", "gestorStores", gestorStoreIds)}
-        ${renderStoreCheckboxes("Lojas que o atendente pode visualizar", "atendenteStores", atendenteStoreIds)}
+      <div id="admin-store-access">
+        ${renderStoreCheckboxes(getAccessStoresTitle(selectedRole), "accessStores", accessStoreIds)}
       </div>
 
-      <button class="primary-button" type="submit">${isEditing ? "Salvar usuario" : "Criar usuario"}</button>
+      <div class="admin-form-actions">
+        <button class="primary-button" type="submit">${isEditing ? "Salvar usuário" : "Criar usuário"}</button>
+      </div>
     </form>
   `;
 }
@@ -316,7 +379,7 @@ function renderStoreCheckboxes(title, name, selectedIds) {
     return `
       <fieldset class="store-checks">
         <legend>${title}</legend>
-        <span>Nenhuma loja disponivel.</span>
+        <span>Nenhuma loja disponível.</span>
       </fieldset>
     `;
   }
@@ -324,12 +387,22 @@ function renderStoreCheckboxes(title, name, selectedIds) {
   return `
     <fieldset class="store-checks">
       <legend>${title}</legend>
+      <div class="store-checks-toolbar">
+        <label>
+          Buscar loja
+          <input type="search" id="store-access-search" placeholder="Nome ou CNPJ" autocomplete="off" />
+        </label>
+        <label class="select-all-stores">
+          <input type="checkbox" id="select-all-stores" />
+          <span>Selecionar todos</span>
+        </label>
+      </div>
       <div>
         ${state.adminStores
           .map((store) => {
             const label = `${store.nome || "Loja sem nome"}${store.cnpj ? ` - ${store.cnpj}` : ""}`;
             return `
-              <label>
+              <label data-store-access-label="${escapeHtml(label.toLowerCase())}">
                 <input type="checkbox" name="${name}" value="${store.id}" ${selectedIds.has(store.id) ? "checked" : ""} />
                 <span>${escapeHtml(label)}</span>
               </label>
@@ -341,12 +414,18 @@ function renderStoreCheckboxes(title, name, selectedIds) {
   `;
 }
 
+function getAccessStoresTitle(role) {
+  return role === "gestor"
+    ? "Lojas que o usuário pode gerenciar"
+    : "Lojas que o atendente pode visualizar";
+}
+
 function renderAdminUsersList() {
   if (!state.adminUsers.length) {
     return `
       <div class="admin-card empty-list">
-        <strong>Nenhum usuario encontrado</strong>
-        <span>Crie o primeiro acesso para esta operacao.</span>
+        <strong>Nenhum usuário encontrado</strong>
+        <span>Crie o primeiro acesso para esta operação.</span>
       </div>
     `;
   }
@@ -354,7 +433,7 @@ function renderAdminUsersList() {
   return `
     <div class="admin-card admin-users">
       <div>
-        <p class="eyebrow">Usuarios</p>
+        <p class="eyebrow">Usuários</p>
         <h2>${state.adminUsers.length} acessos</h2>
       </div>
       <div class="admin-user-list">
@@ -382,7 +461,7 @@ function renderStoreSelector() {
     return `
       <div class="store-strip">
         <strong>Nenhuma loja liberada</strong>
-        <span>Inclua o usuario em <code>usuarios_atendentes</code> para liberar um CNPJ.</span>
+        <span>Inclua o usuário em <code>usuarios_atendentes</code> para liberar um CNPJ.</span>
       </div>
     `;
   }
@@ -415,7 +494,7 @@ function renderConversationList() {
     return `
       <div class="empty-list">
         <strong>Nenhuma conversa</strong>
-        <span>Esta loja ainda nao possui chats abertos.</span>
+        <span>Esta loja ainda não possui chats abertos.</span>
       </div>
     `;
   }
@@ -434,6 +513,7 @@ function renderConversationList() {
       const isActive = state.activeConversation?.id === conversation.id;
       const unreadCount = state.unreadByChat[getConversationKey(conversation)] || 0;
       const title = conversation.nomecliente || `Chat ${conversation.chat_id}`;
+      const phone = conversation.telefone ? ` - ${conversation.telefone}` : "";
       const detail =
         conversation.ultimo_conteudo ||
         conversation.resumo ||
@@ -444,7 +524,7 @@ function renderConversationList() {
         <button class="conversation-item ${isActive ? "active" : ""}" data-conversation-id="${conversation.id}" type="button">
           <span class="conversation-copy">
             <span class="conversation-topline">
-              <strong>${escapeHtml(title)}</strong>
+              <strong>${escapeHtml(title)}<span class="conversation-phone">${escapeHtml(phone)}</span></strong>
               <small>${formatTime(conversation.ultima_mensagem || conversation.data_inicio)}</small>
             </span>
             <span class="conversation-preview-row">
@@ -545,7 +625,7 @@ function renderEmptyChat() {
       <div>
         <p class="eyebrow">Pronto para atender</p>
         <h2>Selecione uma conversa</h2>
-        <p>Os chats aparecem conforme a loja escolhida. Cada CNPJ exibe apenas o historico liberado para seu usuario.</p>
+        <p>Os chats aparecem conforme a loja escolhida. Cada CNPJ exibe apenas o histórico liberado para seu usuário.</p>
       </div>
     </div>
   `;
@@ -571,10 +651,19 @@ function renderPreservingComposer() {
 function bindEvents() {
   document.querySelector("#auth-form")?.addEventListener("submit", handleAuth);
   document.querySelector("#sign-out")?.addEventListener("click", handleSignOut);
+  document.querySelector("#side-sign-out")?.addEventListener("click", handleSignOut);
+  document.querySelector("#menu-toggle")?.addEventListener("click", toggleSideMenu);
+  document.querySelector("#menu-close")?.addEventListener("click", closeSideMenu);
+  document.querySelector("#menu-overlay")?.addEventListener("click", closeSideMenu);
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => handleViewChange(button.dataset.view));
   });
   document.querySelector("#admin-user-form")?.addEventListener("submit", handleSaveAdminUser);
+  document.querySelector("#password-form")?.addEventListener("submit", handleChangePassword);
+  document.querySelector("#admin-role-selector")?.addEventListener("change", handleAdminRoleChange);
+  document.querySelector("#store-access-search")?.addEventListener("input", handleStoreAccessSearch);
+  document.querySelector("#select-all-stores")?.addEventListener("change", handleSelectAllStores);
+  syncSelectAllStoresState();
   document.querySelector("#new-admin-user")?.addEventListener("click", handleNewAdminUser);
   document.querySelectorAll("[data-admin-user-id]").forEach((button) => {
     button.addEventListener("click", () => handleEditAdminUser(button.dataset.adminUserId));
@@ -602,15 +691,21 @@ function bindEvents() {
 }
 
 async function handleViewChange(view) {
-  if (view === state.currentView) return;
+  if (view === state.currentView) {
+    closeSideMenu();
+    return;
+  }
   if (view === "admin" && !canManageAccess()) return;
 
-  state.currentView = view === "admin" ? "admin" : "chat";
+  state.menuOpen = false;
+  state.currentView = ["admin", "password"].includes(view) ? view : "chat";
 
-  if (state.currentView === "admin") {
+  if (state.currentView !== "chat") {
     stopMessagePolling();
     stopConversationListPolling();
-    await loadAdminData();
+    if (state.currentView === "admin") {
+      await loadAdminData();
+    }
   } else {
     if (state.selectedStoreId) {
       startConversationListPolling();
@@ -619,6 +714,45 @@ async function handleViewChange(view) {
   }
 
   render();
+}
+
+function toggleSideMenu() {
+  state.menuOpen = !state.menuOpen;
+  renderPreservingComposer();
+}
+
+function closeSideMenu() {
+  if (!state.menuOpen) return;
+  state.menuOpen = false;
+  renderPreservingComposer();
+}
+
+async function handleChangePassword(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const formData = new FormData(form);
+  const currentPassword = String(formData.get("current_password") || "");
+  const newPassword = String(formData.get("new_password") || "");
+  const confirmPassword = String(formData.get("confirm_password") || "");
+
+  if (newPassword !== confirmPassword) {
+    showToast("A confirmação da senha não confere.");
+    return;
+  }
+
+  const { error } = await supabase.rpc("alterar_senha_atendimento", {
+    p_session_token: state.currentUser.session_token,
+    p_senha_atual: currentPassword,
+    p_nova_senha: newPassword,
+  });
+
+  if (error) {
+    showToast(error.message);
+    return;
+  }
+
+  form.reset();
+  showToast("Senha atualizada.");
 }
 
 function handleNewAdminUser() {
@@ -631,13 +765,52 @@ function handleEditAdminUser(userId) {
   render();
 }
 
+function handleAdminRoleChange(event) {
+  const legend = document.querySelector("#admin-store-access legend");
+  if (legend) {
+    legend.textContent = getAccessStoresTitle(event.currentTarget.value);
+  }
+}
+
+function handleStoreAccessSearch(event) {
+  const query = event.currentTarget.value.trim().toLowerCase();
+  document.querySelectorAll("[data-store-access-label]").forEach((item) => {
+    const text = item.dataset.storeAccessLabel || "";
+    item.hidden = Boolean(query) && !text.includes(query);
+  });
+  syncSelectAllStoresState();
+}
+
+function handleSelectAllStores(event) {
+  getVisibleStoreAccessInputs().forEach((input) => {
+    input.checked = event.currentTarget.checked;
+  });
+  syncSelectAllStoresState();
+}
+
+function getVisibleStoreAccessInputs() {
+  return [...document.querySelectorAll('input[name="accessStores"]')].filter(
+    (input) => !input.closest("[data-store-access-label]")?.hidden
+  );
+}
+
+function syncSelectAllStoresState() {
+  const selectAll = document.querySelector("#select-all-stores");
+  if (!selectAll) return;
+
+  const inputs = getVisibleStoreAccessInputs();
+  const checkedCount = inputs.filter((input) => input.checked).length;
+  selectAll.checked = inputs.length > 0 && checkedCount === inputs.length;
+  selectAll.indeterminate = checkedCount > 0 && checkedCount < inputs.length;
+}
+
 async function handleSaveAdminUser(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const formData = new FormData(form);
   const userId = String(formData.get("user_id") || "").trim();
-  const gestorStoreIds = getCheckedValues(form, "gestorStores");
-  const atendenteStoreIds = getCheckedValues(form, "atendenteStores");
+  const selectedRole = String(formData.get("funcao") || "atendente");
+  const accessStoreIds = getCheckedValues(form, "accessStores");
 
   const { data, error } = await supabase.rpc("admin_salvar_usuario", {
     p_session_token: state.currentUser.session_token,
@@ -645,9 +818,9 @@ async function handleSaveAdminUser(event) {
     p_name: String(formData.get("name") || "").trim(),
     p_email: String(formData.get("email") || "").trim(),
     p_password: String(formData.get("password") || ""),
-    p_funcao: String(formData.get("funcao") || "atendente"),
-    p_gestor_loja_ids: gestorStoreIds,
-    p_atendente_loja_ids: atendenteStoreIds,
+    p_funcao: selectedRole,
+    p_gestor_loja_ids: selectedRole === "gestor" ? accessStoreIds : [],
+    p_atendente_loja_ids: selectedRole === "atendente" ? accessStoreIds : [],
   });
 
   if (error) {
@@ -658,7 +831,7 @@ async function handleSaveAdminUser(event) {
   state.adminEditingUserId = data?.[0]?.id || userId || "";
   await loadAdminData();
   await loadStores();
-  showToast("Usuario salvo.");
+  showToast("Usuário salvo.");
   render();
 }
 
@@ -680,7 +853,7 @@ async function handleAuth(event) {
 
   const user = data?.[0];
   if (!user) {
-    showToast("Email, senha ou permissao de loja invalida.");
+    showToast("E-mail, senha ou permissão de loja inválida.");
     return;
   }
 
@@ -703,6 +876,7 @@ async function handleSignOut() {
   state.conversations = [];
   state.searchQuery = "";
   state.currentView = "chat";
+  state.menuOpen = false;
   state.statusFilters = {
     active: true,
     finished: true,
@@ -862,12 +1036,12 @@ async function sendFinishChatWebhook(chatId) {
 
     if (!response.ok) {
       const detail = await response.text();
-      return detail || `Erro ${response.status} ao chamar webhook de finalizacao.`;
+      return detail || `Erro ${response.status} ao chamar webhook de finalização.`;
     }
 
     return null;
   } catch (error) {
-    return error.message || "Nao foi possivel chamar o webhook de finalizacao.";
+    return error.message || "Não foi possível chamar o webhook de finalização.";
   }
 }
 
@@ -879,7 +1053,7 @@ async function sendMessageToZaia(message) {
   );
 
   if (!phoneNumber) {
-    return "O chat selecionado nao possui telefone do cliente.";
+    return "O chat selecionado não possui telefone do cliente.";
   }
 
   const chatId = Number(state.activeConversation.chat_id);
@@ -910,7 +1084,7 @@ async function sendMessageToZaia(message) {
 
     return null;
   } catch (error) {
-    return error.message || "Nao foi possivel conectar na API da Zaia.";
+    return error.message || "Não foi possível conectar na API da Zaia.";
   }
 }
 
@@ -1117,7 +1291,7 @@ async function selectConversation(conversationId, options = {}) {
   );
 
   if (!conversation) {
-    showToast("Conversa indisponivel para a loja selecionada.");
+    showToast("Conversa indisponível para a loja selecionada.");
     return;
   }
 
