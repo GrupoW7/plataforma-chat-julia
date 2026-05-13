@@ -5,6 +5,60 @@
 alter table public.users
   add column if not exists funcao text not null default 'atendente';
 
+alter table public.mensagens
+  add column if not exists media_url text,
+  add column if not exists media_type text,
+  add column if not exists media_name text;
+
+alter table public.mensagens
+  drop constraint if exists mensagens_media_type_check;
+
+alter table public.mensagens
+  add constraint mensagens_media_type_check
+  check (media_type is null or media_type in ('image', 'video', 'file'));
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values (
+  'chat-attachments',
+  'chat-attachments',
+  true,
+  52428800,
+  array[
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+    'video/mp4',
+    'video/webm',
+    'video/quicktime',
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'text/csv',
+    'text/plain',
+    'application/zip'
+  ]
+)
+on conflict (id) do update
+set
+  public = excluded.public,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "chat attachments public read" on storage.objects;
+create policy "chat attachments public read"
+on storage.objects for select
+to anon, authenticated
+using (bucket_id = 'chat-attachments');
+
+drop policy if exists "chat attachments public upload" on storage.objects;
+create policy "chat attachments public upload"
+on storage.objects for insert
+to anon, authenticated
+with check (bucket_id = 'chat-attachments');
+
 do $$
 begin
   if not exists (
@@ -22,6 +76,22 @@ $$;
 
 create unique index if not exists users_email_unique_lower
   on public.users (lower(email));
+
+create table if not exists public.empresas (
+  id uuid primary key default gen_random_uuid(),
+  nome text not null,
+  cnpj text unique,
+  razaosocial text,
+  created_at timestamptz not null default now()
+);
+
+alter table public.empresas enable row level security;
+
+alter table public.lojas
+  add column if not exists empresa_id uuid references public.empresas(id) on delete set null;
+
+create index if not exists idx_lojas_empresa_id
+  on public.lojas (empresa_id);
 
 create table if not exists public.usuarios_master_emails (
   email text primary key,
@@ -43,6 +113,22 @@ create table if not exists public.usuarios_gestores_lojas (
 );
 
 alter table public.usuarios_gestores_lojas enable row level security;
+
+create table if not exists public.usuarios_gestores_empresas (
+  id uuid primary key default gen_random_uuid(),
+  user_id text not null references public.users(id) on delete cascade,
+  empresa_id uuid not null references public.empresas(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  unique (user_id, empresa_id)
+);
+
+alter table public.usuarios_gestores_empresas enable row level security;
+
+create index if not exists idx_usuarios_gestores_empresas_user
+  on public.usuarios_gestores_empresas (user_id);
+
+create index if not exists idx_usuarios_gestores_empresas_empresa
+  on public.usuarios_gestores_empresas (empresa_id);
 
 create index if not exists idx_usuarios_gestores_lojas_user
   on public.usuarios_gestores_lojas (user_id);
@@ -112,6 +198,13 @@ as $$
       from public.usuarios_gestores_lojas ugl
       where ugl.user_id = p_user_id
         and ugl.loja_id = p_loja_id
+    ) or exists (
+      select 1
+      from public.lojas l
+      join public.usuarios_gestores_empresas uge
+        on uge.empresa_id = l.empresa_id
+      where l.id = p_loja_id
+        and uge.user_id = p_user_id
     )
     else exists (
       select 1
@@ -256,6 +349,7 @@ returns table (
   telefone text,
   resumo text,
   ultimo_conteudo text,
+  ultimo_media_type text,
   ultima_mensagem timestamptz,
   total_mensagens bigint
 )
@@ -306,6 +400,7 @@ as $$
       m.chat_id,
       m.loja_id,
       m.conteudo,
+      m.media_type,
       m.criado_em
     from public.mensagens m
     join (
@@ -333,7 +428,15 @@ as $$
     hu.nomecliente,
     hu.telefone,
     hu.resumo,
-    um.conteudo as ultimo_conteudo,
+    coalesce(
+      um.conteudo,
+      case
+        when um.media_type = 'image' then 'Imagem'
+        when um.media_type = 'video' then 'Vídeo'
+        when um.media_type = 'file' then 'Arquivo'
+      end
+    ) as ultimo_conteudo,
+    um.media_type as ultimo_media_type,
     mp.ultima_mensagem,
     coalesce(mp.total_mensagens, 0) as total_mensagens
   from historico_unico hu
@@ -358,13 +461,25 @@ returns table (
   loja_id uuid,
   remetente_tipo text,
   conteudo text,
+  media_url text,
+  media_type text,
+  media_name text,
   criado_em timestamptz
 )
 language sql
 security definer
 set search_path = public
 as $$
-  select m.id, m.chat_id, m.loja_id, m.remetente_tipo, m.conteudo, m.criado_em
+  select
+    m.id,
+    m.chat_id,
+    m.loja_id,
+    m.remetente_tipo,
+    m.conteudo,
+    m.media_url,
+    m.media_type,
+    m.media_name,
+    m.criado_em
   from public.atendimento_sessions s
   join public.mensagens m
     on m.chat_id = p_chat_id
@@ -376,11 +491,15 @@ as $$
 $$;
 
 drop function if exists public.enviar_mensagem_atendente(uuid, uuid, text, text);
+drop function if exists public.enviar_mensagem_atendente(uuid, uuid, text, text, text, text, text);
 create or replace function public.enviar_mensagem_atendente(
   p_session_token uuid,
   p_loja_id uuid,
   p_chat_id text,
-  p_conteudo text
+  p_conteudo text,
+  p_media_url text default null,
+  p_media_type text default null,
+  p_media_name text default null
 )
 returns table (
   id uuid,
@@ -388,6 +507,9 @@ returns table (
   loja_id uuid,
   remetente_tipo text,
   conteudo text,
+  media_url text,
+  media_type text,
+  media_name text,
   criado_em timestamptz
 )
 language plpgsql
@@ -413,12 +535,41 @@ begin
     raise exception 'Conversa não encontrada nesta loja';
   end if;
 
-  insert into public.mensagens (chat_id, loja_id, remetente_tipo, conteudo)
-  values (p_chat_id, p_loja_id, 'atendente', nullif(trim(p_conteudo), ''))
+  if p_media_type is not null and p_media_type not in ('image', 'video', 'file') then
+    raise exception 'Tipo de mídia inválido';
+  end if;
+
+  insert into public.mensagens (
+    chat_id,
+    loja_id,
+    remetente_tipo,
+    conteudo,
+    media_url,
+    media_type,
+    media_name
+  )
+  values (
+    p_chat_id,
+    p_loja_id,
+    'atendente',
+    nullif(trim(p_conteudo), ''),
+    nullif(trim(coalesce(p_media_url, '')), ''),
+    p_media_type,
+    nullif(trim(coalesce(p_media_name, '')), '')
+  )
   returning mensagens.id into v_message_id;
 
   return query
-  select m.id, m.chat_id, m.loja_id, m.remetente_tipo, m.conteudo, m.criado_em
+  select
+    m.id,
+    m.chat_id,
+    m.loja_id,
+    m.remetente_tipo,
+    m.conteudo,
+    m.media_url,
+    m.media_type,
+    m.media_name,
+    m.criado_em
   from public.mensagens m
   where m.id = v_message_id;
 end;
@@ -461,24 +612,298 @@ begin
 end;
 $$;
 
+drop function if exists public.admin_listar_lojas(uuid);
+drop function if exists public.admin_listar_empresas(uuid);
+drop function if exists public.admin_salvar_empresa(uuid, uuid, text, text, text);
+drop function if exists public.admin_salvar_loja(uuid, uuid, text, text, text, text, text, text, text, text, text, text, text, text);
+drop function if exists public.admin_salvar_loja(uuid, uuid, uuid, text, text, text, text, text, text, text, text, text, text, text, text);
+drop function if exists public.admin_listar_usuarios(uuid);
+drop function if exists public.admin_salvar_usuario(uuid, text, text, text, text, text, uuid[], uuid[]);
+drop function if exists public.admin_salvar_usuario(uuid, text, text, text, text, text, uuid[], uuid[], uuid[]);
+
 create or replace function public.admin_listar_lojas(p_session_token uuid)
 returns table (
   id uuid,
+  empresa_id uuid,
+  empresa_nome text,
   nome text,
-  cnpj text
+  cnpj text,
+  id_externo_loja text,
+  ie text,
+  cep text,
+  logradouro text,
+  numero text,
+  complemento text,
+  bairro text,
+  cidade text,
+  uf text,
+  razaosocial text
 )
 language sql
 security definer
 set search_path = public
 as $$
-  select l.id, l.nome, l.cnpj
+  select
+    l.id,
+    l.empresa_id,
+    e.nome as empresa_nome,
+    l.nome,
+    l.cnpj,
+    l.id_externo_loja,
+    l.ie,
+    l.cep,
+    l.logradouro,
+    l.numero,
+    l.complemento,
+    l.bairro,
+    l.cidade,
+    l.uf,
+    l.razaosocial
   from public.atendimento_sessions s
   join public.lojas l
     on public.crm_user_can_access_store(s.user_id, l.id)
+  left join public.empresas e
+    on e.id = l.empresa_id
   where s.token = p_session_token
     and s.expires_at > now()
     and public.crm_user_role(s.user_id) in ('master', 'gestor')
   order by l.nome;
+$$;
+
+create or replace function public.admin_listar_empresas(p_session_token uuid)
+returns table (
+  id uuid,
+  nome text,
+  cnpj text,
+  razaosocial text
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select distinct e.id, e.nome, e.cnpj, e.razaosocial
+  from public.atendimento_sessions s
+  join public.empresas e
+    on public.crm_user_role(s.user_id) = 'master'
+    or exists (
+      select 1
+      from public.usuarios_gestores_empresas uge
+      where uge.user_id = s.user_id
+        and uge.empresa_id = e.id
+    )
+  where s.token = p_session_token
+    and s.expires_at > now()
+    and public.crm_user_role(s.user_id) in ('master', 'gestor')
+  order by e.nome;
+$$;
+
+create or replace function public.admin_salvar_empresa(
+  p_session_token uuid,
+  p_empresa_id uuid,
+  p_nome text,
+  p_cnpj text,
+  p_razaosocial text
+)
+returns table (
+  id uuid,
+  nome text,
+  cnpj text,
+  razaosocial text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_admin_id text;
+  v_empresa_id uuid;
+begin
+  v_admin_id := public.crm_session_user_id(p_session_token);
+
+  if v_admin_id is null or public.crm_user_role(v_admin_id) <> 'master' then
+    raise exception 'Somente master pode gerenciar empresas';
+  end if;
+
+  if nullif(trim(coalesce(p_nome, '')), '') is null then
+    raise exception 'Informe o nome da empresa';
+  end if;
+
+  if p_empresa_id is null then
+    insert into public.empresas (nome, cnpj, razaosocial)
+    values (
+      nullif(trim(p_nome), ''),
+      nullif(trim(coalesce(p_cnpj, '')), ''),
+      nullif(trim(coalesce(p_razaosocial, '')), '')
+    )
+    returning empresas.id into v_empresa_id;
+  else
+    update public.empresas e
+    set
+      nome = nullif(trim(p_nome), ''),
+      cnpj = nullif(trim(coalesce(p_cnpj, '')), ''),
+      razaosocial = nullif(trim(coalesce(p_razaosocial, '')), '')
+    where e.id = p_empresa_id
+    returning e.id into v_empresa_id;
+  end if;
+
+  return query
+  select e.id, e.nome, e.cnpj, e.razaosocial
+  from public.empresas e
+  where e.id = v_empresa_id;
+end;
+$$;
+
+create or replace function public.admin_salvar_loja(
+  p_session_token uuid,
+  p_loja_id uuid,
+  p_empresa_id uuid,
+  p_nome text,
+  p_cnpj text,
+  p_id_externo_loja text,
+  p_ie text,
+  p_cep text,
+  p_logradouro text,
+  p_numero text,
+  p_complemento text,
+  p_bairro text,
+  p_cidade text,
+  p_uf text,
+  p_razaosocial text
+)
+returns table (
+  id uuid,
+  empresa_id uuid,
+  empresa_nome text,
+  nome text,
+  cnpj text,
+  id_externo_loja text,
+  ie text,
+  cep text,
+  logradouro text,
+  numero text,
+  complemento text,
+  bairro text,
+  cidade text,
+  uf text,
+  razaosocial text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_admin_id text;
+  v_admin_role text;
+  v_loja_id uuid;
+begin
+  v_admin_id := public.crm_session_user_id(p_session_token);
+  v_admin_role := public.crm_user_role(v_admin_id);
+
+  if v_admin_id is null or v_admin_role not in ('master', 'gestor') then
+    raise exception 'Usuário sem permissão administrativa';
+  end if;
+
+  if nullif(trim(coalesce(p_nome, '')), '') is null then
+    raise exception 'Informe o nome da loja';
+  end if;
+
+  if p_empresa_id is null then
+    raise exception 'Selecione a empresa pai da loja';
+  end if;
+
+  if v_admin_role = 'gestor' and not exists (
+    select 1
+    from public.usuarios_gestores_empresas uge
+    where uge.user_id = v_admin_id
+      and uge.empresa_id = p_empresa_id
+  ) then
+    raise exception 'Empresa indisponível para gestão';
+  end if;
+
+  if p_loja_id is not null then
+    if not public.crm_user_can_access_store(v_admin_id, p_loja_id) then
+      raise exception 'Loja indisponível para gestão';
+    end if;
+
+    update public.lojas l
+    set
+      nome = nullif(trim(p_nome), ''),
+      empresa_id = p_empresa_id,
+      cnpj = nullif(trim(coalesce(p_cnpj, '')), ''),
+      id_externo_loja = nullif(trim(coalesce(p_id_externo_loja, '')), ''),
+      ie = nullif(trim(coalesce(p_ie, '')), ''),
+      cep = nullif(trim(coalesce(p_cep, '')), ''),
+      logradouro = nullif(trim(coalesce(p_logradouro, '')), ''),
+      numero = nullif(trim(coalesce(p_numero, '')), ''),
+      complemento = nullif(trim(coalesce(p_complemento, '')), ''),
+      bairro = nullif(trim(coalesce(p_bairro, '')), ''),
+      cidade = nullif(trim(coalesce(p_cidade, '')), ''),
+      uf = upper(nullif(trim(coalesce(p_uf, '')), '')),
+      razaosocial = nullif(trim(coalesce(p_razaosocial, '')), '')
+    where l.id = p_loja_id
+    returning l.id into v_loja_id;
+  else
+    insert into public.lojas (
+      nome,
+      empresa_id,
+      cnpj,
+      id_externo_loja,
+      ie,
+      cep,
+      logradouro,
+      numero,
+      complemento,
+      bairro,
+      cidade,
+      uf,
+      razaosocial
+    )
+    values (
+      nullif(trim(p_nome), ''),
+      p_empresa_id,
+      nullif(trim(coalesce(p_cnpj, '')), ''),
+      nullif(trim(coalesce(p_id_externo_loja, '')), ''),
+      nullif(trim(coalesce(p_ie, '')), ''),
+      nullif(trim(coalesce(p_cep, '')), ''),
+      nullif(trim(coalesce(p_logradouro, '')), ''),
+      nullif(trim(coalesce(p_numero, '')), ''),
+      nullif(trim(coalesce(p_complemento, '')), ''),
+      nullif(trim(coalesce(p_bairro, '')), ''),
+      nullif(trim(coalesce(p_cidade, '')), ''),
+      upper(nullif(trim(coalesce(p_uf, '')), '')),
+      nullif(trim(coalesce(p_razaosocial, '')), '')
+    )
+    returning lojas.id into v_loja_id;
+
+    if v_admin_role = 'gestor' then
+      insert into public.usuarios_gestores_lojas (user_id, loja_id)
+      values (v_admin_id, v_loja_id)
+      on conflict (user_id, loja_id) do nothing;
+    end if;
+  end if;
+
+  return query
+  select
+    l.id,
+    l.empresa_id,
+    e.nome as empresa_nome,
+    l.nome,
+    l.cnpj,
+    l.id_externo_loja,
+    l.ie,
+    l.cep,
+    l.logradouro,
+    l.numero,
+    l.complemento,
+    l.bairro,
+    l.cidade,
+    l.uf,
+    l.razaosocial
+  from public.lojas l
+  left join public.empresas e
+    on e.id = l.empresa_id
+  where l.id = v_loja_id;
+end;
 $$;
 
 create or replace function public.admin_listar_usuarios(p_session_token uuid)
@@ -488,6 +913,7 @@ returns table (
   email text,
   funcao text,
   is_master boolean,
+  gestor_empresa_ids uuid[],
   gestor_loja_ids uuid[],
   atendente_loja_ids uuid[]
 )
@@ -515,6 +941,10 @@ as $$
     public.crm_user_role(u.id) as funcao,
     public.crm_user_role(u.id) = 'master' as is_master,
     coalesce(
+      array_agg(distinct uge.empresa_id) filter (where uge.empresa_id is not null),
+      array[]::uuid[]
+    ) as gestor_empresa_ids,
+    coalesce(
       array_agg(distinct ugl.loja_id) filter (where ugl.loja_id is not null),
       array[]::uuid[]
     ) as gestor_loja_ids,
@@ -540,6 +970,17 @@ as $$
   left join public.usuarios_gestores_lojas ugl
     on ugl.user_id = u.id
    and exists (select 1 from lojas_admin la where la.id = ugl.loja_id)
+  left join public.usuarios_gestores_empresas uge
+    on uge.user_id = u.id
+   and (
+     s.role = 'master'
+     or exists (
+       select 1
+       from public.usuarios_gestores_empresas uge_scope
+       where uge_scope.user_id = s.user_id
+         and uge_scope.empresa_id = uge.empresa_id
+     )
+   )
   left join public.usuarios_atendentes ua
     on ua.user_id = u.id
    and exists (select 1 from lojas_admin la where la.id = ua.loja_id)
@@ -555,6 +996,7 @@ create or replace function public.admin_salvar_usuario(
   p_password text,
   p_funcao text,
   p_gestor_loja_ids uuid[] default array[]::uuid[],
+  p_gestor_empresa_ids uuid[] default array[]::uuid[],
   p_atendente_loja_ids uuid[] default array[]::uuid[]
 )
 returns table (
@@ -573,7 +1015,9 @@ declare
   v_user_id text;
   v_funcao text;
   v_allowed_store_ids uuid[];
+  v_allowed_empresa_ids uuid[];
   v_store_id uuid;
+  v_empresa_id uuid;
 begin
   v_admin_id := public.crm_session_user_id(p_session_token);
   v_admin_role := public.crm_user_role(v_admin_id);
@@ -595,6 +1039,23 @@ begin
   foreach v_store_id in array coalesce(p_gestor_loja_ids, array[]::uuid[]) loop
     if not v_store_id = any(v_allowed_store_ids) then
       raise exception 'Loja indisponível para gestão';
+    end if;
+  end loop;
+
+  select coalesce(array_agg(e.id), array[]::uuid[])
+  into v_allowed_empresa_ids
+  from public.empresas e
+  where v_admin_role = 'master'
+     or exists (
+       select 1
+       from public.usuarios_gestores_empresas uge
+       where uge.user_id = v_admin_id
+         and uge.empresa_id = e.id
+     );
+
+  foreach v_empresa_id in array coalesce(p_gestor_empresa_ids, array[]::uuid[]) loop
+    if not v_empresa_id = any(v_allowed_empresa_ids) then
+      raise exception 'Empresa indisponível para gestão';
     end if;
   end loop;
 
@@ -640,6 +1101,10 @@ begin
   where ugl.user_id = v_user_id
     and ugl.loja_id = any(v_allowed_store_ids);
 
+  delete from public.usuarios_gestores_empresas uge
+  where uge.user_id = v_user_id
+    and uge.empresa_id = any(v_allowed_empresa_ids);
+
   delete from public.usuarios_atendentes ua
   where ua.user_id = v_user_id
     and ua.loja_id = any(v_allowed_store_ids);
@@ -648,6 +1113,12 @@ begin
     insert into public.usuarios_gestores_lojas (user_id, loja_id)
     values (v_user_id, v_store_id)
     on conflict (user_id, loja_id) do nothing;
+  end loop;
+
+  foreach v_empresa_id in array coalesce(p_gestor_empresa_ids, array[]::uuid[]) loop
+    insert into public.usuarios_gestores_empresas (user_id, empresa_id)
+    values (v_user_id, v_empresa_id)
+    on conflict (user_id, empresa_id) do nothing;
   end loop;
 
   foreach v_store_id in array coalesce(p_atendente_loja_ids, array[]::uuid[]) loop
@@ -711,9 +1182,12 @@ grant execute on function public.login_atendente(text, text) to anon, authentica
 grant execute on function public.lojas_do_atendente(uuid) to anon, authenticated;
 grant execute on function public.historico_por_loja(uuid, uuid) to anon, authenticated;
 grant execute on function public.mensagens_da_conversa(uuid, uuid, text) to anon, authenticated;
-grant execute on function public.enviar_mensagem_atendente(uuid, uuid, text, text) to anon, authenticated;
+grant execute on function public.enviar_mensagem_atendente(uuid, uuid, text, text, text, text, text) to anon, authenticated;
 grant execute on function public.finalizar_conversa_atendimento(uuid, uuid, text) to anon, authenticated;
 grant execute on function public.admin_listar_lojas(uuid) to anon, authenticated;
+grant execute on function public.admin_listar_empresas(uuid) to anon, authenticated;
 grant execute on function public.admin_listar_usuarios(uuid) to anon, authenticated;
-grant execute on function public.admin_salvar_usuario(uuid, text, text, text, text, text, uuid[], uuid[]) to anon, authenticated;
+grant execute on function public.admin_salvar_empresa(uuid, uuid, text, text, text) to anon, authenticated;
+grant execute on function public.admin_salvar_loja(uuid, uuid, uuid, text, text, text, text, text, text, text, text, text, text, text, text) to anon, authenticated;
+grant execute on function public.admin_salvar_usuario(uuid, text, text, text, text, text, uuid[], uuid[], uuid[]) to anon, authenticated;
 grant execute on function public.alterar_senha_atendimento(uuid, text, text) to anon, authenticated;

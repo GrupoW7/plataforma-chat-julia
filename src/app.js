@@ -8,6 +8,26 @@ const ZAIA_AUTH_TOKEN = "7ca346d9-0834-4559-b9ec-6eb8888320bd";
 const FINISH_CHAT_WEBHOOK_URL =
   "https://hook.us1.make.com/lihc76dghcolia5uhycxenuovbv9vdux";
 const DISPLAY_TIME_OFFSET_MS = -3 * 60 * 60 * 1000;
+const ATTACHMENT_BUCKET = "chat-attachments";
+const MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_EXTENSIONS = new Set([
+  ".csv",
+  ".doc",
+  ".docx",
+  ".gif",
+  ".jpeg",
+  ".jpg",
+  ".mov",
+  ".mp4",
+  ".pdf",
+  ".png",
+  ".txt",
+  ".webm",
+  ".webp",
+  ".xls",
+  ".xlsx",
+  ".zip",
+]);
 const MOBILE_SIDEBAR_QUERY = "(max-width: 820px)";
 const isMobileSidebarViewport = () =>
   window.matchMedia(MOBILE_SIDEBAR_QUERY).matches;
@@ -25,9 +45,12 @@ const state = {
     active: true,
     finished: true,
   },
+  adminCompanies: [],
   adminStores: [],
   adminUsers: [],
+  adminEditingCompanyId: "",
   adminEditingUserId: "",
+  adminEditingStoreId: "",
   adminStoreSearch: "",
   adminLoading: false,
   unreadByChat: {},
@@ -35,6 +58,8 @@ const state = {
   activeConversation: null,
   messages: [],
   loading: true,
+  authLoading: false,
+  authEmail: "",
   realtimeChannel: null,
   refreshTimer: null,
   listRefreshTimer: null,
@@ -81,6 +106,42 @@ function createSupabaseRestClient(url, apiKey) {
       } catch (error) {
         return { data: null, error };
       }
+    },
+    async uploadFile(bucket, filePath, file) {
+      try {
+        const response = await fetch(
+          `${baseUrl}/storage/v1/object/${bucket}/${filePath}`,
+          {
+            method: "POST",
+            headers: {
+              apikey: apiKey,
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": file.type || "application/octet-stream",
+              "x-upsert": "false",
+            },
+            body: file,
+          }
+        );
+
+        const text = await response.text();
+        const payload = text ? JSON.parse(text) : null;
+
+        if (!response.ok) {
+          return {
+            data: null,
+            error: {
+              message: payload?.message || `Erro ${response.status} no upload`,
+            },
+          };
+        }
+
+        return { data: payload, error: null };
+      } catch (error) {
+        return { data: null, error };
+      }
+    },
+    getPublicUrl(bucket, filePath) {
+      return `${baseUrl}/storage/v1/object/public/${bucket}/${filePath}`;
     },
     async removeChannel() {},
     channel() {
@@ -163,13 +224,27 @@ function renderAuth() {
         <form id="auth-form" class="stack">
           <label>
             E-mail
-            <input type="email" name="email" autocomplete="email" required />
+            <input type="email" name="email" autocomplete="email" value="${escapeHtml(state.authEmail)}" ${state.authLoading ? "disabled" : ""} required />
           </label>
           <label>
             Senha
-            <input type="password" name="password" autocomplete="current-password" required />
+            <input type="password" name="password" autocomplete="current-password" ${state.authLoading ? "disabled" : ""} required />
           </label>
-          <button class="primary-button" type="submit">Entrar</button>
+          <button class="primary-button login-button" type="submit" aria-busy="${state.authLoading ? "true" : "false"}" ${state.authLoading ? "disabled" : ""}>
+            ${
+              state.authLoading
+                ? `<span class="login-loader" aria-hidden="true"></span><span>Entrando...</span>`
+                : "Entrar"
+            }
+          </button>
+          ${
+            state.authLoading
+              ? `<div class="login-wait" role="status">
+                  <span class="login-wait-gif" aria-hidden="true"></span>
+                  <span>Carregando seu atendimento...</span>
+                </div>`
+              : ""
+          }
         </form>
       </section>
     </main>
@@ -190,6 +265,10 @@ function renderWorkspace() {
       ${
         state.currentView === "password"
           ? renderPasswordPanel()
+          : state.currentView === "companies" && isMaster()
+          ? renderCompaniesPanel()
+          : state.currentView === "stores" && canManageAccess()
+          ? renderStoresPanel()
           : state.currentView === "admin" && canManageAccess()
           ? renderAdminPanel()
           : renderChatWorkspace()
@@ -232,6 +311,8 @@ function renderSideMenu() {
       <nav>
         <button class="${state.currentView === "chat" ? "active" : ""}" data-view="chat" type="button">Atendimento</button>
         ${canManageAccess() ? `<button class="${state.currentView === "admin" ? "active" : ""}" data-view="admin" type="button">Gestão de acessos</button>` : ""}
+        ${isMaster() ? `<button class="${state.currentView === "companies" ? "active" : ""}" data-view="companies" type="button">Empresas</button>` : ""}
+        ${canManageAccess() ? `<button class="${state.currentView === "stores" ? "active" : ""}" data-view="stores" type="button">Cadastro de lojas</button>` : ""}
         <button class="${state.currentView === "password" ? "active" : ""}" data-view="password" type="button">Trocar senha</button>
         <button class="side-sign-out" id="side-sign-out" type="button">Sair</button>
       </nav>
@@ -319,6 +400,62 @@ function renderAdminPanel() {
   `;
 }
 
+function renderStoresPanel() {
+  const editingStore = getEditingAdminStore();
+
+  return `
+    <section class="admin-panel">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">Lojas</p>
+          <h1>Cadastro de lojas</h1>
+          <p>Cadastre novas unidades e mantenha todos os dados da operação atualizados.</p>
+        </div>
+        <button class="secondary-button" id="new-admin-store" type="button">Nova loja</button>
+      </header>
+
+      ${
+        state.adminLoading
+          ? `<div class="admin-loading"><span class="loader"></span></div>`
+          : `
+            <div class="admin-grid">
+              ${renderStoreForm(editingStore)}
+              ${renderStoresList()}
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderCompaniesPanel() {
+  const editingCompany = getEditingCompany();
+
+  return `
+    <section class="admin-panel">
+      <header class="admin-header">
+        <div>
+          <p class="eyebrow">Empresas</p>
+          <h1>Cadastro de empresas</h1>
+          <p>Crie empresas pai para organizar lojas e liberar gestores por grupo.</p>
+        </div>
+        <button class="secondary-button" id="new-admin-company" type="button">Nova empresa</button>
+      </header>
+
+      ${
+        state.adminLoading
+          ? `<div class="admin-loading"><span class="loader"></span></div>`
+          : `
+            <div class="admin-grid">
+              ${renderCompanyForm(editingCompany)}
+              ${renderCompaniesList()}
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
 function renderPasswordPanel() {
   return `
     <section class="password-panel">
@@ -348,13 +485,176 @@ function renderPasswordPanel() {
   `;
 }
 
+function renderCompanyForm(company) {
+  const isEditing = Boolean(company?.id);
+
+  return `
+    <form id="admin-company-form" class="admin-card admin-form">
+      <input type="hidden" name="id" value="${escapeHtml(company?.id || "")}" />
+      <div>
+        <p class="eyebrow">${isEditing ? "Editar empresa" : "Nova empresa"}</p>
+        <h2>${isEditing ? escapeHtml(company.nome || company.cnpj || "Empresa") : "Cadastrar empresa"}</h2>
+      </div>
+
+      <div class="admin-form-grid">
+        ${renderStoreInput("nome", "Nome", company?.nome, true)}
+        ${renderStoreInput("cnpj", "CNPJ", company?.cnpj)}
+        ${renderStoreInput("razaosocial", "Razão social", company?.razaosocial)}
+      </div>
+
+      <div class="admin-form-actions">
+        <button class="primary-button" type="submit">${isEditing ? "Salvar empresa" : "Cadastrar empresa"}</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderCompaniesList() {
+  if (!state.adminCompanies.length) {
+    return `
+      <div class="admin-card empty-list">
+        <strong>Nenhuma empresa encontrada</strong>
+        <span>Cadastre a primeira empresa para vincular lojas.</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="admin-card admin-users">
+      <div>
+        <p class="eyebrow">Empresas</p>
+        <h2>${state.adminCompanies.length} empresas</h2>
+      </div>
+      <div class="admin-user-list">
+        ${state.adminCompanies
+          .map((company) => {
+            const selected = state.adminEditingCompanyId === company.id;
+            return `
+              <button class="admin-user-item ${selected ? "active" : ""}" data-admin-company-id="${company.id}" type="button">
+                <span>
+                  <strong>${escapeHtml(company.nome || "Empresa sem nome")}</strong>
+                  <small>${escapeHtml(company.cnpj || "Sem CNPJ")}</small>
+                </span>
+                <span>Editar</span>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderStoreForm(store) {
+  const isEditing = Boolean(store?.id);
+  const selectedCompanyId = store?.empresa_id || state.adminCompanies[0]?.id || "";
+
+  return `
+    <form id="admin-store-form" class="admin-card admin-form">
+      <input type="hidden" name="id" value="${escapeHtml(store?.id || "")}" />
+      <div>
+        <p class="eyebrow">${isEditing ? "Editar loja" : "Nova loja"}</p>
+        <h2>${isEditing ? escapeHtml(store.nome || store.cnpj || "Loja") : "Cadastrar unidade"}</h2>
+      </div>
+
+      <div class="admin-form-grid">
+        ${renderStoreInput("nome", "Nome", store?.nome, true)}
+        ${renderCompanySelect(selectedCompanyId)}
+        ${renderStoreInput("cnpj", "CNPJ", store?.cnpj)}
+        ${renderStoreInput("razaosocial", "Razão social", store?.razaosocial)}
+        ${renderStoreInput("id_externo_loja", "ID externo da loja", store?.id_externo_loja)}
+        ${renderStoreInput("ie", "Inscrição estadual", store?.ie)}
+        ${renderStoreInput("cep", "CEP", store?.cep)}
+        ${renderStoreInput("logradouro", "Logradouro", store?.logradouro)}
+        ${renderStoreInput("numero", "Número", store?.numero)}
+        ${renderStoreInput("complemento", "Complemento", store?.complemento)}
+        ${renderStoreInput("bairro", "Bairro", store?.bairro)}
+        ${renderStoreInput("cidade", "Cidade", store?.cidade)}
+        ${renderStoreInput("uf", "UF", store?.uf)}
+      </div>
+
+      <div class="admin-form-actions">
+        <button class="primary-button" type="submit">${isEditing ? "Salvar loja" : "Cadastrar loja"}</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderCompanySelect(selectedCompanyId) {
+  return `
+    <label>
+      Empresa pai
+      <select name="empresa_id" required>
+        <option value="">Selecione uma empresa</option>
+        ${state.adminCompanies
+          .map((company) => `
+            <option value="${company.id}" ${company.id === selectedCompanyId ? "selected" : ""}>
+              ${escapeHtml(company.nome || company.cnpj || "Empresa")}
+            </option>
+          `)
+          .join("")}
+      </select>
+    </label>
+  `;
+}
+
+function renderStoreInput(name, label, value = "", required = false) {
+  return `
+    <label>
+      ${label}
+      <input name="${name}" value="${escapeHtml(value || "")}" ${required ? "required" : ""} />
+    </label>
+  `;
+}
+
+function renderStoresList() {
+  if (!state.adminStores.length) {
+    return `
+      <div class="admin-card empty-list">
+        <strong>Nenhuma loja encontrada</strong>
+        <span>Cadastre a primeira loja para liberar atendimentos.</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="admin-card admin-users">
+      <div>
+        <p class="eyebrow">Unidades</p>
+        <h2>${state.adminStores.length} lojas</h2>
+      </div>
+      <div class="admin-user-list">
+        ${state.adminStores
+          .map((store) => {
+            const selected = state.adminEditingStoreId === store.id;
+            const location = [store.cidade, store.uf].filter(Boolean).join(" - ");
+            return `
+              <button class="admin-user-item ${selected ? "active" : ""}" data-admin-store-id="${store.id}" type="button">
+                <span>
+                  <strong>${escapeHtml(store.nome || "Loja sem nome")}</strong>
+                  <small>${escapeHtml(store.cnpj || "Sem CNPJ")}</small>
+                  <small>${escapeHtml(store.empresa_nome || "Sem empresa vinculada")}</small>
+                  ${location ? `<small>${escapeHtml(location)}</small>` : ""}
+                </span>
+                <span>Editar</span>
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderAdminUserForm(user) {
   const isEditing = Boolean(user?.id);
   const gestorStoreIds = new Set(user?.gestor_loja_ids || []);
+  const gestorCompanyIds = new Set(user?.gestor_empresa_ids || []);
   const atendenteStoreIds = new Set(user?.atendente_loja_ids || []);
   const selectedRole = user?.is_master ? "gestor" : user?.funcao || "atendente";
   const accessStoreIds =
     selectedRole === "gestor" ? gestorStoreIds : atendenteStoreIds;
+  const accessCompanyIds = selectedRole === "gestor" ? gestorCompanyIds : new Set();
 
   return `
     <form id="admin-user-form" class="admin-card admin-form">
@@ -388,13 +688,47 @@ function renderAdminUserForm(user) {
       </div>
 
       <div id="admin-store-access">
-        ${renderStoreCheckboxes(getAccessStoresTitle(selectedRole), "accessStores", accessStoreIds)}
+        ${
+          selectedRole === "gestor"
+            ? renderCompanyCheckboxes("Empresas que o gestor pode gerenciar", "accessCompanies", accessCompanyIds)
+            : renderStoreCheckboxes(getAccessStoresTitle(selectedRole), "accessStores", accessStoreIds)
+        }
       </div>
 
       <div class="admin-form-actions">
         <button class="primary-button" type="submit">${isEditing ? "Salvar usuário" : "Criar usuário"}</button>
       </div>
     </form>
+  `;
+}
+
+function renderCompanyCheckboxes(title, name, selectedIds) {
+  if (!state.adminCompanies.length) {
+    return `
+      <fieldset class="store-checks">
+        <legend>${title}</legend>
+        <span>Nenhuma empresa disponível.</span>
+      </fieldset>
+    `;
+  }
+
+  return `
+    <fieldset class="store-checks">
+      <legend>${title}</legend>
+      <div>
+        ${state.adminCompanies
+          .map((company) => {
+            const label = `${company.nome || "Empresa sem nome"}${company.cnpj ? ` - ${company.cnpj}` : ""}`;
+            return `
+              <label>
+                <input type="checkbox" name="${name}" value="${company.id}" ${selectedIds.has(company.id) ? "checked" : ""} />
+                <span>${escapeHtml(label)}</span>
+              </label>
+            `;
+          })
+          .join("")}
+      </div>
+    </fieldset>
   `;
 }
 
@@ -624,7 +958,12 @@ function renderChat() {
     </div>
 
     <form id="message-form" class="composer">
-      <input name="message" placeholder="Digite uma mensagem" autocomplete="off" required />
+      <input name="message" placeholder="Digite uma mensagem" autocomplete="off" />
+      <label class="attachment-button" title="Anexar arquivo" aria-label="Anexar arquivo">
+        <input type="file" name="attachment" accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.zip" />
+        <span>+</span>
+      </label>
+      <span class="attachment-name" id="attachment-name" aria-live="polite"></span>
       <button type="submit">Enviar</button>
     </form>
   `;
@@ -640,12 +979,29 @@ function renderMessages() {
       const mine = message.remetente_tipo === "atendente";
       return `
         <article class="message ${mine ? "mine" : "theirs"}">
+          ${renderMessageMedia(message)}
           <p>${escapeHtml(message.conteudo || "")}</p>
           <time>${formatTime(message.criado_em)}</time>
         </article>
       `;
     })
     .join("");
+}
+
+function renderMessageMedia(message) {
+  if (!message.media_url) return "";
+
+  const url = escapeHtml(message.media_url);
+  const name = escapeHtml(message.media_name || "Anexo");
+  if (message.media_type === "image") {
+    return `<img class="message-media" src="${url}" alt="${name}" loading="lazy" />`;
+  }
+
+  if (message.media_type === "video") {
+    return `<video class="message-media" src="${url}" controls playsinline></video>`;
+  }
+
+  return `<a class="message-attachment" href="${url}" target="_blank" rel="noreferrer">${name}</a>`;
 }
 
 function renderEmptyChat() {
@@ -690,14 +1046,24 @@ function bindEvents() {
     button.addEventListener("click", () => handleViewChange(button.dataset.view));
   });
   document.querySelector("#admin-user-form")?.addEventListener("submit", handleSaveAdminUser);
+  document.querySelector("#admin-store-form")?.addEventListener("submit", handleSaveStore);
+  document.querySelector("#admin-company-form")?.addEventListener("submit", handleSaveCompany);
   document.querySelector("#password-form")?.addEventListener("submit", handleChangePassword);
   document.querySelector("#admin-role-selector")?.addEventListener("change", handleAdminRoleChange);
   document.querySelector("#store-access-search")?.addEventListener("input", handleStoreAccessSearch);
   document.querySelector("#select-all-stores")?.addEventListener("change", handleSelectAllStores);
   syncSelectAllStoresState();
   document.querySelector("#new-admin-user")?.addEventListener("click", handleNewAdminUser);
+  document.querySelector("#new-admin-store")?.addEventListener("click", handleNewAdminStore);
+  document.querySelector("#new-admin-company")?.addEventListener("click", handleNewAdminCompany);
   document.querySelectorAll("[data-admin-user-id]").forEach((button) => {
     button.addEventListener("click", () => handleEditAdminUser(button.dataset.adminUserId));
+  });
+  document.querySelectorAll("[data-admin-store-id]").forEach((button) => {
+    button.addEventListener("click", () => handleEditAdminStore(button.dataset.adminStoreId));
+  });
+  document.querySelectorAll("[data-admin-company-id]").forEach((button) => {
+    button.addEventListener("click", () => handleEditAdminCompany(button.dataset.adminCompanyId));
   });
   document.querySelector("#store-selector")?.addEventListener("change", handleStoreChange);
   document.querySelector("#chat-search-form")?.addEventListener("submit", handleSearchChats);
@@ -706,6 +1072,7 @@ function bindEvents() {
     input.addEventListener("change", handleStatusFilterChange);
   });
   document.querySelector("#message-form")?.addEventListener("submit", handleSendMessage);
+  document.querySelector('#message-form input[name="attachment"]')?.addEventListener("change", handleAttachmentChange);
   document.querySelector("#finish-chat")?.addEventListener("click", handleFinishChat);
   document.querySelector(".workspace")?.addEventListener("pointerdown", markUserInteraction);
   document.querySelector(".workspace")?.addEventListener("keydown", markUserInteraction);
@@ -726,10 +1093,11 @@ async function handleViewChange(view) {
     closeSideMenu();
     return;
   }
-  if (view === "admin" && !canManageAccess()) return;
+  if (["admin", "stores"].includes(view) && !canManageAccess()) return;
+  if (view === "companies" && !isMaster()) return;
 
   state.menuOpen = false;
-  state.currentView = ["admin", "password"].includes(view) ? view : "chat";
+  state.currentView = ["admin", "stores", "companies", "password"].includes(view) ? view : "chat";
   if (state.currentView === "chat" && isMobileSidebarViewport()) {
     state.sidebarOpen = false;
   }
@@ -737,7 +1105,7 @@ async function handleViewChange(view) {
   if (state.currentView !== "chat") {
     stopMessagePolling();
     stopConversationListPolling();
-    if (state.currentView === "admin") {
+    if (["admin", "stores", "companies"].includes(state.currentView)) {
       await loadAdminData();
     }
   } else {
@@ -777,6 +1145,13 @@ function closeMobileHistorySidebar() {
   state.sidebarOpen = false;
 }
 
+function handleAttachmentChange(event) {
+  const file = event.currentTarget.files?.[0];
+  const label = document.querySelector("#attachment-name");
+  if (!label) return;
+  label.textContent = file ? file.name : "";
+}
+
 async function handleChangePassword(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -812,6 +1187,26 @@ function handleNewAdminUser() {
 
 function handleEditAdminUser(userId) {
   state.adminEditingUserId = userId;
+  render();
+}
+
+function handleNewAdminStore() {
+  state.adminEditingStoreId = "";
+  render();
+}
+
+function handleEditAdminStore(storeId) {
+  state.adminEditingStoreId = storeId;
+  render();
+}
+
+function handleNewAdminCompany() {
+  state.adminEditingCompanyId = "";
+  render();
+}
+
+function handleEditAdminCompany(companyId) {
+  state.adminEditingCompanyId = companyId;
   render();
 }
 
@@ -862,6 +1257,7 @@ async function handleSaveAdminUser(event) {
   const userId = String(formData.get("user_id") || "").trim();
   const selectedRole = String(formData.get("funcao") || "atendente");
   const accessStoreIds = getCheckedValues(form, "accessStores");
+  const accessCompanyIds = getCheckedValues(form, "accessCompanies");
 
   const { data, error } = await supabase.rpc("admin_salvar_usuario", {
     p_session_token: state.currentUser.session_token,
@@ -870,7 +1266,8 @@ async function handleSaveAdminUser(event) {
     p_email: String(formData.get("email") || "").trim(),
     p_password: String(formData.get("password") || ""),
     p_funcao: selectedRole,
-    p_gestor_loja_ids: selectedRole === "gestor" ? accessStoreIds : [],
+    p_gestor_loja_ids: [],
+    p_gestor_empresa_ids: selectedRole === "gestor" ? accessCompanyIds : [],
     p_atendente_loja_ids: selectedRole === "atendente" ? accessStoreIds : [],
   });
 
@@ -886,15 +1283,27 @@ async function handleSaveAdminUser(event) {
   render();
 }
 
-async function handleAuth(event) {
+async function handleSaveStore(event) {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const email = String(form.get("email") || "").trim();
-  const password = String(form.get("password") || "");
+  const form = event.currentTarget;
+  const formData = new FormData(form);
 
-  const { data, error } = await supabase.rpc("login_atendente", {
-    p_email: email,
-    p_password: password,
+  const { data, error } = await supabase.rpc("admin_salvar_loja", {
+    p_session_token: state.currentUser.session_token,
+    p_loja_id: nullIfBlank(formData.get("id")),
+    p_empresa_id: nullIfBlank(formData.get("empresa_id")),
+    p_nome: nullIfBlank(formData.get("nome")),
+    p_cnpj: nullIfBlank(formData.get("cnpj")),
+    p_id_externo_loja: nullIfBlank(formData.get("id_externo_loja")),
+    p_ie: nullIfBlank(formData.get("ie")),
+    p_cep: nullIfBlank(formData.get("cep")),
+    p_logradouro: nullIfBlank(formData.get("logradouro")),
+    p_numero: nullIfBlank(formData.get("numero")),
+    p_complemento: nullIfBlank(formData.get("complemento")),
+    p_bairro: nullIfBlank(formData.get("bairro")),
+    p_cidade: nullIfBlank(formData.get("cidade")),
+    p_uf: nullIfBlank(formData.get("uf")),
+    p_razaosocial: nullIfBlank(formData.get("razaosocial")),
   });
 
   if (error) {
@@ -902,16 +1311,79 @@ async function handleAuth(event) {
     return;
   }
 
-  const user = data?.[0];
-  if (!user) {
-    showToast("E-mail, senha ou permissão de loja inválida.");
+  state.adminEditingStoreId = data?.[0]?.id || "";
+  await loadAdminData();
+  await loadStores();
+  showToast("Loja salva.");
+  render();
+}
+
+async function handleSaveCompany(event) {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+
+  const { data, error } = await supabase.rpc("admin_salvar_empresa", {
+    p_session_token: state.currentUser.session_token,
+    p_empresa_id: nullIfBlank(formData.get("id")),
+    p_nome: nullIfBlank(formData.get("nome")),
+    p_cnpj: nullIfBlank(formData.get("cnpj")),
+    p_razaosocial: nullIfBlank(formData.get("razaosocial")),
+  });
+
+  if (error) {
+    showToast(error.message);
     return;
   }
 
-  state.currentUser = user;
-  localStorage.setItem(SESSION_KEY, JSON.stringify(user));
-  requestNotificationPermission();
-  await loadInitialData();
+  state.adminEditingCompanyId = data?.[0]?.id || "";
+  await loadAdminData();
+  showToast("Empresa salva.");
+  render();
+}
+
+function nullIfBlank(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+async function handleAuth(event) {
+  event.preventDefault();
+  if (state.authLoading) return;
+
+  const form = new FormData(event.currentTarget);
+  const email = String(form.get("email") || "").trim();
+  const password = String(form.get("password") || "");
+
+  state.authEmail = email;
+  state.authLoading = true;
+  render();
+
+  try {
+    const { data, error } = await supabase.rpc("login_atendente", {
+      p_email: email,
+      p_password: password,
+    });
+
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    const user = data?.[0];
+    if (!user) {
+      throw new Error("E-mail, senha ou permissão de loja inválida.");
+    }
+
+    state.currentUser = user;
+    state.authLoading = false;
+    state.authEmail = "";
+    localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+    requestNotificationPermission();
+    await loadInitialData();
+  } catch (error) {
+    state.authLoading = false;
+    render();
+    showToast(error.message || "Não foi possível acessar agora.");
+  }
 }
 
 async function handleSignOut() {
@@ -922,6 +1394,8 @@ async function handleSignOut() {
   stopConversationListPolling();
   localStorage.removeItem(SESSION_KEY);
   state.currentUser = null;
+  state.authLoading = false;
+  state.authEmail = "";
   state.stores = [];
   state.selectedStoreId = null;
   state.conversations = [];
@@ -934,8 +1408,11 @@ async function handleSignOut() {
     finished: true,
   };
   state.adminStores = [];
+  state.adminCompanies = [];
   state.adminUsers = [];
+  state.adminEditingCompanyId = "";
   state.adminEditingUserId = "";
+  state.adminEditingStoreId = "";
   state.adminStoreSearch = "";
   state.adminLoading = false;
   state.unreadByChat = {};
@@ -975,6 +1452,10 @@ function canManageAccess() {
   return ["master", "gestor"].includes(state.currentUser?.funcao);
 }
 
+function isMaster() {
+  return state.currentUser?.funcao === "master" || state.currentUser?.is_master;
+}
+
 function getRoleLabel(role) {
   if (role === "master") return "Master";
   if (role === "gestor") return "Gestor";
@@ -985,6 +1466,20 @@ function getEditingAdminUser() {
   if (!state.adminEditingUserId) return null;
   return (
     state.adminUsers.find((user) => user.id === state.adminEditingUserId) || null
+  );
+}
+
+function getEditingAdminStore() {
+  if (!state.adminEditingStoreId) return null;
+  return (
+    state.adminStores.find((store) => store.id === state.adminEditingStoreId) || null
+  );
+}
+
+function getEditingCompany() {
+  if (!state.adminEditingCompanyId) return null;
+  return (
+    state.adminCompanies.find((company) => company.id === state.adminEditingCompanyId) || null
   );
 }
 
@@ -1009,12 +1504,26 @@ async function handleSendMessage(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const attendantMessage = String(form.get("message") || "").trim();
-  if (!attendantMessage || !state.activeConversation) return;
+  const attachment = form.get("attachment");
+  const hasAttachment = attachment instanceof File && attachment.size > 0;
+  if ((!attendantMessage && !hasAttachment) || !state.activeConversation) return;
 
   const composerInput = event.currentTarget.querySelector('input[name="message"]');
-  if (composerInput) composerInput.value = "";
+  const attachmentInput = event.currentTarget.querySelector('input[name="attachment"]');
 
-  const zaiaError = await sendMessageToZaia(attendantMessage);
+  const attachmentData = hasAttachment
+    ? await uploadChatAttachment(attachment)
+    : null;
+  if (attachmentData?.error) {
+    showToast(attachmentData.error);
+    return;
+  }
+
+  const messageToSend =
+    attendantMessage ||
+    getAttachmentFallbackMessage(attachmentData?.mediaType);
+
+  const zaiaError = await sendMessageToZaia(messageToSend, attachmentData);
   if (zaiaError) {
     showToast(zaiaError);
     return;
@@ -1024,7 +1533,10 @@ async function handleSendMessage(event) {
     p_session_token: state.currentUser.session_token,
     p_loja_id: state.selectedStoreId,
     p_chat_id: state.activeConversation.chat_id,
-    p_conteudo: attendantMessage,
+    p_conteudo: messageToSend,
+    p_media_url: attachmentData?.url || null,
+    p_media_type: attachmentData?.mediaType || null,
+    p_media_name: attachmentData?.name || null,
   });
 
   if (error) {
@@ -1032,10 +1544,83 @@ async function handleSendMessage(event) {
     return;
   }
 
+  if (composerInput) composerInput.value = "";
+  if (attachmentInput) attachmentInput.value = "";
+  const attachmentName = event.currentTarget.querySelector("#attachment-name");
+  if (attachmentName) attachmentName.textContent = "";
   if (data?.[0]) state.messages = [...state.messages, data[0]];
   await loadConversations({ notify: false });
   syncActiveConversationFromList();
   render();
+}
+
+async function uploadChatAttachment(file) {
+  const extension = getFileExtension(file.name, file.type);
+  const mediaType = getAttachmentMediaType(file, extension);
+
+  if (file.size > MAX_ATTACHMENT_SIZE) {
+    return { error: "O arquivo deve ter no máximo 50 MB." };
+  }
+
+  if (!mediaType) {
+    return { error: "Envie imagens, vídeos ou arquivos nos formatos PDF, Word, Excel, CSV, TXT ou ZIP." };
+  }
+
+  const filePath = [
+    state.selectedStoreId,
+    state.activeConversation.chat_id,
+    `${Date.now()}-${crypto.randomUUID()}${extension}`,
+  ].join("/");
+
+  const { error } = await supabase.uploadFile(
+    ATTACHMENT_BUCKET,
+    filePath,
+    file
+  );
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  return {
+    url: supabase.getPublicUrl(ATTACHMENT_BUCKET, filePath),
+    mediaType,
+    name: file.name,
+  };
+}
+
+function getAttachmentMediaType(file, extension) {
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("video/")) return "video";
+  if (ALLOWED_ATTACHMENT_EXTENSIONS.has(extension)) return "file";
+  return "";
+}
+
+function getAttachmentFallbackMessage(mediaType) {
+  if (mediaType === "image") return "Imagem enviada";
+  if (mediaType === "video") return "Vídeo enviado";
+  return "Arquivo enviado";
+}
+
+function getFileExtension(fileName, mimeType) {
+  const fromName = String(fileName || "").match(/\.[a-z0-9]+$/i)?.[0];
+  if (fromName) return fromName.toLowerCase();
+
+  if (mimeType === "image/png") return ".png";
+  if (mimeType === "image/webp") return ".webp";
+  if (mimeType === "image/gif") return ".gif";
+  if (mimeType === "video/webm") return ".webm";
+  if (mimeType === "video/quicktime") return ".mov";
+  if (mimeType === "application/pdf") return ".pdf";
+  if (mimeType === "text/csv") return ".csv";
+  if (mimeType === "text/plain") return ".txt";
+  if (mimeType === "application/zip") return ".zip";
+  if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return ".docx";
+  if (mimeType === "application/msword") return ".doc";
+  if (mimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") return ".xlsx";
+  if (mimeType === "application/vnd.ms-excel") return ".xls";
+  if (!mimeType) return "";
+  return mimeType.startsWith("video/") ? ".mp4" : ".jpg";
 }
 
 async function handleFinishChat() {
@@ -1098,7 +1683,7 @@ async function sendFinishChatWebhook(chatId) {
   }
 }
 
-async function sendMessageToZaia(message) {
+async function sendMessageToZaia(message, attachmentData = null) {
   const attendantMessage = String(message || "").trim();
   const phoneNumber = String(state.activeConversation.telefone || "").replace(
     /\D/g,
@@ -1119,6 +1704,18 @@ async function sendMessageToZaia(message) {
       : chatId,
     channel: "whatsapp_business",
   };
+
+  if (attachmentData?.url && attachmentData.mediaType === "image") {
+    payload.imageUrl = attachmentData.url;
+  }
+
+  if (attachmentData?.url && attachmentData.mediaType === "video") {
+    payload.videoUrl = attachmentData.url;
+  }
+
+  if (attachmentData?.url && attachmentData.mediaType === "file") {
+    payload.documentUrl = attachmentData.url;
+  }
 
   try {
     const response = await fetch(ZAIA_MESSAGE_API_URL, {
@@ -1164,14 +1761,17 @@ async function loadInitialData() {
     }
     requestNotificationPermission();
     await loadStores();
-    if (!canManageAccess() && state.currentView === "admin") {
+    if (!canManageAccess() && ["admin", "stores"].includes(state.currentView)) {
+      state.currentView = "chat";
+    }
+    if (!isMaster() && state.currentView === "companies") {
       state.currentView = "chat";
     }
     await loadConversations({ notify: false });
     if (state.conversations[0]) {
       await selectConversation(state.conversations[0].id, { silent: true });
     }
-    if (state.currentView === "admin" && canManageAccess()) {
+    if (["admin", "stores", "companies"].includes(state.currentView) && canManageAccess()) {
       await loadAdminData();
     } else {
       startConversationListPolling();
@@ -1235,7 +1835,10 @@ async function loadAdminData() {
   state.adminLoading = true;
   render();
 
-  const [storesResult, usersResult] = await Promise.all([
+  const [companiesResult, storesResult, usersResult] = await Promise.all([
+    supabase.rpc("admin_listar_empresas", {
+      p_session_token: state.currentUser.session_token,
+    }),
     supabase.rpc("admin_listar_lojas", {
       p_session_token: state.currentUser.session_token,
     }),
@@ -1244,10 +1847,28 @@ async function loadAdminData() {
     }),
   ]);
 
+  if (companiesResult.error) {
+    showToast(companiesResult.error.message);
+  } else {
+    state.adminCompanies = companiesResult.data || [];
+    if (
+      state.adminEditingCompanyId &&
+      !state.adminCompanies.some((company) => company.id === state.adminEditingCompanyId)
+    ) {
+      state.adminEditingCompanyId = "";
+    }
+  }
+
   if (storesResult.error) {
     showToast(storesResult.error.message);
   } else {
     state.adminStores = storesResult.data || [];
+    if (
+      state.adminEditingStoreId &&
+      !state.adminStores.some((store) => store.id === state.adminEditingStoreId)
+    ) {
+      state.adminEditingStoreId = "";
+    }
   }
 
   if (usersResult.error) {
@@ -1440,11 +2061,11 @@ function isUserInteracting() {
 }
 
 function renderWhenIdle() {
-  if (isUserInteracting()) {
+  if (isUserInteracting() || hasPendingAttachment()) {
     state.pendingSilentRefresh = true;
     window.clearTimeout(renderWhenIdle.timeoutId);
     renderWhenIdle.timeoutId = window.setTimeout(() => {
-      if (!isUserInteracting() && state.pendingSilentRefresh) {
+      if (!isUserInteracting() && !hasPendingAttachment() && state.pendingSilentRefresh) {
         state.pendingSilentRefresh = false;
         renderPreservingComposer();
       }
@@ -1454,6 +2075,11 @@ function renderWhenIdle() {
 
   state.pendingSilentRefresh = false;
   renderPreservingComposer();
+}
+
+function hasPendingAttachment() {
+  const input = document.querySelector('#message-form input[name="attachment"]');
+  return Boolean(input?.files?.length);
 }
 
 function sortMessagesByDate(messages) {
